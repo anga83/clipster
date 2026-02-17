@@ -164,27 +164,14 @@ create_app_bundle() {
     # Copy resources
     cp -r "Sources/Clipster/Resources/AppIcon.xcassets" "${APP_NAME}.app/Contents/Resources/"
 
-    # Build a real AppIcon.icns so Launchpad and Finder always get a static bundle icon.
-    echo -e "${YELLOW}⚙️  Building AppIcon.icns...${NC}"
+    # Use the canonical, known-good icon.
+    echo -e "${YELLOW}⚙️  Copying AppIcon.icns...${NC}"
     local icon_output="${APP_NAME}.app/Contents/Resources/AppIcon.icns"
-    if [[ -d "AppIcon.iconset" ]]; then
-        iconutil --convert icns --output "$icon_output" "AppIcon.iconset"
-    else
-        local temp_iconset
-        temp_iconset="$(mktemp -d)/AppIcon.iconset"
-        mkdir -p "$temp_iconset"
-        cp Sources/Clipster/Resources/AppIcon.xcassets/icon_*.png "$temp_iconset/"
-        iconutil --convert icns --output "$icon_output" "$temp_iconset"
-    fi
-
-    if [[ ! -f "$icon_output" && -f "AppIcon.icns" ]]; then
-        cp "AppIcon.icns" "$icon_output"
-    fi
-
-    if [[ ! -f "$icon_output" ]]; then
-        echo -e "${RED}❌ AppIcon.icns could not be generated${NC}"
+    if [[ ! -f "AppIcon.icns" ]]; then
+        echo -e "${RED}❌ AppIcon.icns not found in project root${NC}"
         exit 1
     fi
+    cp "AppIcon.icns" "$icon_output"
     
     echo -e "${GREEN}✅ App bundle created${NC}"
 }

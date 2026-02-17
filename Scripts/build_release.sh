@@ -34,24 +34,18 @@ cp .build/release/Clipster "$RELEASE_DIR/$APP_NAME/Contents/MacOS/"
 # Copy Info.plist
 cp Sources/Clipster/Resources/Info.plist "$RELEASE_DIR/$APP_NAME/Contents/"
 
-# Generate app icon if it doesn't exist
-if [ ! -f "Sources/Clipster/Resources/AppIcon.xcassets/icon_512x512.png" ]; then
-    echo "🎨 Generating app icons..."
-    bash Scripts/generate_app_icon.sh
-fi
-
 # Copy app icons
 echo "🎨 Copying app icons..."
 mkdir -p "$RELEASE_DIR/$APP_NAME/Contents/Resources/AppIcon.xcassets"
 cp -r Sources/Clipster/Resources/AppIcon.xcassets/* "$RELEASE_DIR/$APP_NAME/Contents/Resources/AppIcon.xcassets/"
 
-# Convert icon set to .icns file using iconutil
-echo "🖼️ Converting icons to .icns..."
-if [ ! -d "AppIcon.iconset" ]; then
-    mkdir -p AppIcon.iconset
-    cp Sources/Clipster/Resources/AppIcon.xcassets/*.png AppIcon.iconset/
+# Copy the known-good icon directly
+echo "🖼️ Copying AppIcon.icns..."
+if [ ! -f "AppIcon.icns" ]; then
+    echo "❌ AppIcon.icns not found in project root"
+    exit 1
 fi
-iconutil -c icns -o "$RELEASE_DIR/$APP_NAME/Contents/Resources/AppIcon.icns" AppIcon.iconset
+cp "AppIcon.icns" "$RELEASE_DIR/$APP_NAME/Contents/Resources/AppIcon.icns"
 
 # Make executable... executable
 chmod +x "$RELEASE_DIR/$APP_NAME/Contents/MacOS/Clipster"
