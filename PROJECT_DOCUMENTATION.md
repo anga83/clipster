@@ -138,16 +138,9 @@ Unter `~/Library/Application Support/Clipster/`:
 
 ## 6. Bekannte Hinweise und technische Schulden
 
-1. SPM-Warnung zu `AppIcon.icns`
-- Da in `Package.swift` nur `AppIcon.xcassets` als Resource deklariert ist, meldet SPM `AppIcon.icns` derzeit als unhandled file.
-- Das ist für den Build nicht kritisch, sollte aber langfristig sauber im Paketmodell berücksichtigt oder bewusst außerhalb des Target-Resource-Pfads gehalten werden.
-
-2. Historischer `PersistenceManager`
+1. Historischer `PersistenceManager`
 - Enthält teils ältere JSON/ZIP-Pfade.
 - Der aktuelle produktive Backup-Export läuft über `BackupExportService` + `ClipboardHistoryStore.exportHistory`.
-
-3. Konsolidierung von Altdateien
-- Es gibt Dateien mit `_NEW`-Suffix (z. B. `ArchiveView_NEW.swift`, `ClipboardHistoryStore_NEW.swift`), die geprüft/aufgeräumt werden sollten.
 
 ## 7. Wichtige Verhaltensdetails (Regression-sensitive)
 
@@ -169,7 +162,7 @@ Unter `~/Library/Application Support/Clipster/`:
 
 ## 8. Roadmap-Empfehlungen
 - Import auf denselben modernen Backup-Standard heben wie Export
-- Technische Konsolidierung (`PersistenceManager`, `_NEW`-Dateien)
+- Technische Konsolidierung (`PersistenceManager`)
 - Unit-/Integrationstests einführen (aktuell keine echte automatisierte Test-Suite)
 - Optional Signierung/Notarisierung und Distributionspipeline erweitern
 
@@ -182,28 +175,24 @@ Dieser Abschnitt enthält projektrelevante Kontextinformationen aus dem bisherig
 1. Menüleisten-App-First
 - Clipster läuft überwiegend als Menubar-App, Hauptfenster ist ergänzend.
 
-2. Icon/Launchpad
-- Es gab explizit ein Problem „Icon sichtbar in Dock/Applications, aber nicht in Launchpad".
-- Erwartung: reproduzierbar korrektes App-Icon im Bundle, keine fehleranfällige Icon-Erzeugungskette.
-
-3. Popover-Item-Zähler
+2. Popover-Item-Zähler
 - Realtime ist nicht zwingend erforderlich.
 - Gewünscht: Aktualisierung in sinnvollen Batches (konkret: nach 10 neuen Items).
 
-4. Export-Verhalten
+3. Export-Verhalten
 - Export soll funktionieren aus Hauptfenster und Popover.
 - Gewünscht ist ein vollständiges Backupformat als ZIP aus SQLite-DB, Settings, Attachments.
 - Wenn Vorbereitung länger dauert: kleines Fortschrittsfenster anzeigen.
 - Anschließend soll ein Speichern-Dialog erscheinen.
 
-5. Copy-Regression vermeiden
+4. Copy-Regression vermeiden
 - Klick auf ein Item im Menubar-Popover darf beim Re-Copy kein neues History-Item erzeugen.
 - Interne Clipboard-Writes müssen im Monitor dedupliziert/ignoriert werden.
 
-6. Hauptfenster-Toolbar
+5. Hauptfenster-Toolbar
 - Icons in der Top-Bar benötigen Tooltips (Bedeutung nicht selbsterklärend).
 
-7. Build Date im About
+6. Build Date im About
 - Muss das tatsächliche Build-Datum anzeigen, nicht hartcodiert.
 
 ### 9.2 Praktische Projektkonventionen aus dem Verlauf
@@ -216,18 +205,11 @@ Dieser Abschnitt enthält projektrelevante Kontextinformationen aus dem bisherig
 
 3. Icon-Quelle
 - Kanonische Quelle ist jetzt `Sources/Clipster/Resources/AppIcon.icns`.
-- Vermeide alternative/duplizierte Iconquellen und defekte `iconset`-Pfadnutzung.
+- Vermeide alternative/duplizierte Iconquellen.
 
 ### 9.3 Offene Punkte, die ein LLM als Nächstes sauber weiterführen kann
 1. Import modernisieren
 - Den derzeitigen Import-Placeholder in `ClipboardHistoryStore` auf das neue Backupformat angleichen.
 
-2. Resource-Warnung entschärfen
-- Umgang mit `AppIcon.icns` in `Package.swift` sauber definieren (oder Ordnerlayout anpassen).
-
-3. Doku-/Code-Konsolidierung
-- Alte/duplizierte Artefakte und `_NEW`-Dateien prüfen und ggf. entfernen.
-
-4. Testbarkeit
+2. Testbarkeit
 - Automatisierte Tests (mindestens für Export/Import und ClipboardMonitor-Deduplizierung) ergänzen.
-
