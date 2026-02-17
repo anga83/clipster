@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Clipster Release Build Script
-# Version 1.5 - 13.07.2025
+# Version 2.0 - 17.02.2026
 
 set -e
 
@@ -41,11 +41,12 @@ cp -r Sources/Clipster/Resources/AppIcon.xcassets/* "$RELEASE_DIR/$APP_NAME/Cont
 
 # Copy the known-good icon directly
 echo "🖼️ Copying AppIcon.icns..."
-if [ ! -f "AppIcon.icns" ]; then
-    echo "❌ AppIcon.icns not found in project root"
+ICON_SOURCE="Sources/Clipster/Resources/AppIcon.icns"
+if [ ! -f "$ICON_SOURCE" ]; then
+    echo "❌ AppIcon.icns not found at $ICON_SOURCE"
     exit 1
 fi
-cp "AppIcon.icns" "$RELEASE_DIR/$APP_NAME/Contents/Resources/AppIcon.icns"
+cp "$ICON_SOURCE" "$RELEASE_DIR/$APP_NAME/Contents/Resources/AppIcon.icns"
 
 # Make executable... executable
 chmod +x "$RELEASE_DIR/$APP_NAME/Contents/MacOS/Clipster"

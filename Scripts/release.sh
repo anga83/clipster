@@ -167,11 +167,12 @@ create_app_bundle() {
     # Use the canonical, known-good icon.
     echo -e "${YELLOW}⚙️  Copying AppIcon.icns...${NC}"
     local icon_output="${APP_NAME}.app/Contents/Resources/AppIcon.icns"
-    if [[ ! -f "AppIcon.icns" ]]; then
-        echo -e "${RED}❌ AppIcon.icns not found in project root${NC}"
+    local icon_source="Sources/Clipster/Resources/AppIcon.icns"
+    if [[ ! -f "$icon_source" ]]; then
+        echo -e "${RED}❌ AppIcon.icns not found at $icon_source${NC}"
         exit 1
     fi
-    cp "AppIcon.icns" "$icon_output"
+    cp "$icon_source" "$icon_output"
     
     echo -e "${GREEN}✅ App bundle created${NC}"
 }
