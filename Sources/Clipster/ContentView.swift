@@ -126,18 +126,21 @@ struct ContentView: View {
                     Button(action: { historyStore.importHistory(settingsStore: settingsStore) }) {
                         Label("Import", systemImage: "square.and.arrow.down")
                     }
+                    .help("Import history from a backup file")
                 }
                 
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: { historyStore.exportHistory(settingsStore: settingsStore) }) {
                         Label("Export", systemImage: "square.and.arrow.up")
                     }
+                    .help("Export a full backup (database, settings, attachments)")
                 }
 
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: { isShowingClearOptions = true }) {
                         Label("Clear History", systemImage: "trash")
                     }
+                    .help("Clear clipboard history with options")
                 }
                 
                 ToolbarItem(placement: .primaryAction) {
@@ -149,6 +152,7 @@ struct ContentView: View {
                         }
                     }
                     .foregroundColor(isSelectionMode ? .red : .accentColor)
+                    .help(isSelectionMode ? "Exit selection mode" : "Select multiple items")
                 }
             }
             

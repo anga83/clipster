@@ -151,6 +151,12 @@ struct ClipboardItemRowView: View {
         case .fileURL(let url):
             pasteboard.writeObjects([url as NSURL])
         }
+
+        NotificationCenter.default.post(
+            name: .clipsterDidWritePasteboard,
+            object: nil,
+            userInfo: ["changeCount": pasteboard.changeCount]
+        )
     }
     
     private func createTemporaryFileProvider(url: URL, data: Data) -> NSItemProvider {

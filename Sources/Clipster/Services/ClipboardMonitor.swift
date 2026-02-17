@@ -10,11 +10,35 @@ class ClipboardMonitor {
     private var timer: DispatchSourceTimer?
     private let monitorQueue = DispatchQueue(label: "clipster.clipboard.monitor", qos: .userInitiated)
     private var lastChangeCount: Int
+    private var ignorePasteboardChangesUpTo: Int = 0
+    private var notificationObserver: NSObjectProtocol?
 
     init(historyStore: ClipboardHistoryStore, settingsStore: SettingsStore) {
         self.historyStore = historyStore
         self.settingsStore = settingsStore
         self.lastChangeCount = pasteboard.changeCount
+
+        notificationObserver = NotificationCenter.default.addObserver(
+            forName: .clipsterDidWritePasteboard,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            guard
+                let self = self,
+                let changeCount = notification.userInfo?["changeCount"] as? Int
+            else {
+                return
+            }
+            self.monitorQueue.async {
+                self.ignorePasteboardChangesUpTo = max(self.ignorePasteboardChangesUpTo, changeCount)
+            }
+        }
+    }
+
+    deinit {
+        if let notificationObserver {
+            NotificationCenter.default.removeObserver(notificationObserver)
+        }
     }
 
     /// Starts monitoring the clipboard for new clipboard content.
@@ -48,6 +72,14 @@ class ClipboardMonitor {
 
         lastChangeCount = currentChangeCount
         print("ClipboardMonitor: Clipboard change detected (changeCount: \(currentChangeCount))")
+
+        if currentChangeCount <= ignorePasteboardChangesUpTo {
+            print("ClipboardMonitor: Ignoring internal clipboard write (changeCount: \(currentChangeCount))")
+            if currentChangeCount == ignorePasteboardChangesUpTo {
+                ignorePasteboardChangesUpTo = 0
+            }
+            return
+        }
 
         // Capture frontmost app info on main thread to avoid API misuse
         let (capturedSourceID, capturedSourceName): (String?, String?) = DispatchQueue.main.sync {

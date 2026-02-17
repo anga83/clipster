@@ -2,6 +2,21 @@ import SwiftUI
 
 /// A view that displays information about the Clipster application.
 struct AboutView: View {
+    private var buildDateText: String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "dd.MM.yyyy"
+
+        if
+            let executableURL = Bundle.main.executableURL,
+            let values = try? executableURL.resourceValues(forKeys: [.contentModificationDateKey]),
+            let modificationDate = values.contentModificationDate
+        {
+            return dateFormatter.string(from: modificationDate)
+        }
+
+        return dateFormatter.string(from: Date())
+    }
+
     var body: some View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "N/A"
 
@@ -19,7 +34,7 @@ struct AboutView: View {
                     .foregroundColor(.secondary)
             }
 
-            Text("Build Date: 13.09.2025")
+            Text("Build Date: \(buildDateText)")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
