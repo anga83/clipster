@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import AppKit
+import UniformTypeIdentifiers
 
 /// Manages the collection of clipboard items using SQLite database.
 /// This class is an `ObservableObject` to allow SwiftUI views to react to its changes.
@@ -11,6 +13,11 @@ class ClipboardHistoryStore: ObservableObject {
     private let databaseManager: DatabaseManager
     private var cancellables = Set<AnyCancellable>()
     private let debugLogger = DebugLogger.shared
+    private let backupExportService = BackupExportService()
+    private let countRefreshBatchSize = 10
+    private var newItemsSinceLastCountRefresh = 0
+    private var isRefreshingTotalCount = false
+    private var exportProgressWindowController: ExportProgressWindowController?
 
     private let settingsStore: SettingsStore
 
@@ -55,6 +62,7 @@ class ClipboardHistoryStore: ObservableObject {
             let recentCount = recentUnpinned.count
             await MainActor.run {
                 self.totalItemCount = totalConst
+                self.newItemsSinceLastCountRefresh = 0
                 self.items = mergedConst
                 self.debugLogger.log("Loaded pinned (\(pinnedCount)) + recent unpinned (\(recentCount))", level: .info)
                 // Defer enabling the monitor slightly to avoid re-entrant NSTableView delegate warnings
@@ -68,6 +76,28 @@ class ClipboardHistoryStore: ObservableObject {
     /// Public refresh to apply changed limits without app restart
     func refreshInitialLoad() {
         loadItemsFromDatabase()
+    }
+
+    private func refreshTotalItemCountIfNeeded(force: Bool = false) {
+        guard force || newItemsSinceLastCountRefresh >= countRefreshBatchSize else {
+            return
+        }
+        guard !isRefreshingTotalCount else {
+            return
+        }
+
+        isRefreshingTotalCount = true
+        newItemsSinceLastCountRefresh = 0
+
+        let db = databaseManager
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self = self else { return }
+            let latestCount = db.countAllClipboardItems()
+            await MainActor.run {
+                self.totalItemCount = latestCount
+                self.isRefreshingTotalCount = false
+            }
+        }
     }
 
     // MARK: - Searching all history without loading everything into memory
@@ -99,6 +129,9 @@ class ClipboardHistoryStore: ObservableObject {
         // Insert to database first
         debugLogger.log("Calling databaseManager.insertClipboardItem", level: .info)
         databaseManager.insertClipboardItem(item)
+        totalItemCount += 1
+        newItemsSinceLastCountRefresh += 1
+        refreshTotalItemCountIfNeeded()
         
         // Update local array on next runloop tick to avoid reentrancy in NSTableView delegate callbacks
         DispatchQueue.main.async { [weak self] in
@@ -130,6 +163,7 @@ class ClipboardHistoryStore: ObservableObject {
         
         // Remove from local array - this makes it disappear from the UI
         items.remove(at: index)
+        totalItemCount = max(0, totalItemCount - 1)
         debugLogger.log("Successfully removed item from local array. New count: \(items.count)", level: .info)
         
         print("ClipboardHistoryStore: Moved item \(id) to archive")
@@ -177,6 +211,7 @@ class ClipboardHistoryStore: ObservableObject {
     func clearNonPinnedItems() {
         databaseManager.clearNonPinnedItems()
         items.removeAll { !$0.isPinned }
+        refreshTotalItemCountIfNeeded(force: true)
         print("ClipboardHistoryStore: Cleared non-pinned items")
     }
 
@@ -184,6 +219,8 @@ class ClipboardHistoryStore: ObservableObject {
     func clearAllItems() {
         databaseManager.clearAllItems()
         items.removeAll()
+        totalItemCount = 0
+        newItemsSinceLastCountRefresh = 0
         print("ClipboardHistoryStore: Cleared all items")
     }
 
@@ -282,16 +319,95 @@ class ClipboardHistoryStore: ObservableObject {
     
     // MARK: - Import/Export Methods
     
-    /// Exports the clipboard history to a JSON file
+    /// Exports a full backup as ZIP (SQLite DB + settings + attachments).
     func exportHistory(settingsStore: SettingsStore) {
-        // Placeholder for export functionality
-        print("ClipboardHistoryStore: Export functionality placeholder")
+        let progressWindow = ExportProgressWindowController()
+        exportProgressWindowController = progressWindow
+        progressWindow.update(status: "Preparing backup ...", progress: 0.01)
+        progressWindow.show()
+
+        let supportDirectoryURL = settingsStore.getSupportDirectoryURL()
+        let settingsFileURL = settingsStore.getSettingsFileURL()
+        let attachmentsDirectoryURL = settingsStore.getAttachmentsDirectoryURL()
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "N/A"
+        let appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "N/A"
+        let backupService = backupExportService
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            do {
+                let preparedBackup = try backupService.prepareBackup(
+                    supportDirectoryURL: supportDirectoryURL,
+                    settingsFileURL: settingsFileURL,
+                    attachmentsDirectoryURL: attachmentsDirectoryURL,
+                    appVersion: appVersion,
+                    appBuild: appBuild
+                ) { status, progress in
+                    DispatchQueue.main.async {
+                        self.exportProgressWindowController?.update(status: status, progress: progress)
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    self.finishExportPreparation(preparedBackup)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.handleExportFailure(error)
+                }
+            }
+        }
     }
     
     /// Imports clipboard history from a JSON file
     func importHistory(settingsStore: SettingsStore) {
         // Placeholder for import functionality
         print("ClipboardHistoryStore: Import functionality placeholder")
+    }
+
+    private func finishExportPreparation(_ preparedBackup: BackupExportService.PreparedBackup) {
+        exportProgressWindowController?.update(status: "Backup preparation finished.", progress: 1.0)
+        exportProgressWindowController?.close()
+        exportProgressWindowController = nil
+
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.zip]
+        savePanel.canCreateDirectories = true
+        savePanel.title = "Save Backup"
+        savePanel.message = "Choose where to save your Clipster backup ZIP."
+        savePanel.nameFieldStringValue = preparedBackup.suggestedFileName
+
+        guard savePanel.runModal() == .OK, let destinationURL = savePanel.url else {
+            try? FileManager.default.removeItem(at: preparedBackup.temporaryDirectoryURL)
+            return
+        }
+
+        do {
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try FileManager.default.copyItem(at: preparedBackup.archiveURL, to: destinationURL)
+        } catch {
+            showExportErrorAlert(message: error.localizedDescription)
+        }
+
+        try? FileManager.default.removeItem(at: preparedBackup.temporaryDirectoryURL)
+    }
+
+    private func handleExportFailure(_ error: Error) {
+        exportProgressWindowController?.close()
+        exportProgressWindowController = nil
+        showExportErrorAlert(message: error.localizedDescription)
+    }
+
+    private func showExportErrorAlert(message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Backup Export Failed"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
     
     // MARK: - Sample Data for Previews

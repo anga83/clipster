@@ -391,9 +391,7 @@ struct SettingsView: View {
                             icon: "square.and.arrow.up.fill",
                             iconColor: .green,
                             title: "Export History",
-                            description: settings.usePhysicalFileStorage ? 
-                                "Export history as ZIP file with attachments" : 
-                                "Export history as JSON file",
+                            description: "Create a full ZIP backup (SQLite DB, settings, attachments)",
                             buttonTitle: "Export"
                         ) {
                             historyStore.exportHistory(settingsStore: settings)
