@@ -26,10 +26,19 @@ struct ContentView: View {
     @State private var isSelectionMode: Bool        = false
     @State private var selectedItems: Set<UUID>     = []
     @State private var lastSelectedItem: UUID?      = nil
+    @State private var allHistoryItems: [ClipboardItem] = []
+    @State private var hasLoadedAllHistoryItems = false
 
     private static let filteredExportDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return formatter
+    }()
+
+    private static let integerFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .none
+        formatter.minimum = 0
         return formatter
     }()
 
@@ -49,16 +58,33 @@ struct ContentView: View {
         !selectedSourceApps.isEmpty || pinnedOnlyFilter || useDateRangeFilter || useTextLengthFilter
     }
 
-    private var filteredItems: [ClipboardItem] {
-        let sourceItems: [ClipboardItem]
-        if searchText.isEmpty {
-            sourceItems = baseItems
-        } else {
-            // When searching, query the full history from DB to include older items.
-            sourceItems = historyStore.searchAllHistory(searchText, sourceAppName: nil)
+    private var allItemsForFiltering: [ClipboardItem] {
+        if isPopover {
+            return baseItems
         }
 
+        if hasLoadedAllHistoryItems {
+            return allHistoryItems
+        }
+
+        return historyStore.items
+    }
+
+    private var filteredItems: [ClipboardItem] {
+        let sourceItems = allItemsForFiltering
+
         var items = sourceItems
+
+        if !searchText.isEmpty {
+            items = items.filter { item in
+                switch item.content {
+                case .text(let text):
+                    return text.localizedCaseInsensitiveContains(searchText)
+                case .fileURL(let url):
+                    return url.absoluteString.localizedCaseInsensitiveContains(searchText)
+                }
+            }
+        }
 
         if !selectedSourceApps.isEmpty {
             items = items.filter { item in
@@ -104,7 +130,7 @@ struct ContentView: View {
     }
 
     private var sourceApps: [String] {
-    let allApps = historyStore.items.compactMap { $0.sourceAppName }
+    let allApps = allItemsForFiltering.compactMap { $0.sourceAppName }
         return Array(Set(allApps)).sorted()
     }
 
@@ -293,6 +319,15 @@ struct ContentView: View {
                     .help(hasActiveFilters ? "Edit active filters" : "Open filters")
                 }
             }
+        }
+        .onAppear {
+            refreshAllHistoryItemsIfNeeded()
+        }
+        .onChange(of: historyStore.totalItemCount) { _, _ in
+            refreshAllHistoryItemsIfNeeded(force: true)
+        }
+        .onChange(of: historyStore.items) { _, _ in
+            refreshAllHistoryItemsIfNeeded(force: true)
         }
     }
     
@@ -509,80 +544,87 @@ extension ContentView {
     @ViewBuilder
     private var advancedFiltersView: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Toggle("Pinned only", isOn: $pinnedOnlyFilter)
-                                .toggleStyle(.switch)
+            Form {
+                Section("Source") {
+                    Toggle("Pinned only", isOn: $pinnedOnlyFilter)
 
-                            if !sourceApps.isEmpty {
-                                Divider()
-                                Text("Apps (\(selectedSourceApps.count) selected)")
-                                    .font(.headline)
-                                ScrollView {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        ForEach(sourceApps, id: \.self) { appName in
-                                            Button {
-                                                toggleSourceAppFilter(appName)
-                                            } label: {
-                                                HStack {
-                                                    Image(systemName: selectedSourceApps.contains(appName) ? "checkmark.circle.fill" : "circle")
-                                                        .foregroundColor(selectedSourceApps.contains(appName) ? .accentColor : .secondary)
-                                                    Text(appName)
-                                                        .foregroundColor(.primary)
-                                                    Spacer()
-                                                }
-                                            }
-                                            .buttonStyle(.plain)
+                    if sourceApps.isEmpty {
+                        Text("No source applications available yet.")
+                            .foregroundColor(.secondary)
+                    } else {
+                        HStack {
+                            Button("Select all apps") {
+                                selectedSourceApps = Set(sourceApps)
+                            }
+                            .buttonStyle(.link)
+
+                            Button("Clear app selection") {
+                                selectedSourceApps.removeAll()
+                            }
+                            .buttonStyle(.link)
+
+                            Spacer()
+
+                            Text("\(selectedSourceApps.count) selected")
+                                .foregroundColor(.secondary)
+                        }
+
+                        ForEach(sourceApps, id: \.self) { appName in
+                            Toggle(
+                                appName,
+                                isOn: Binding(
+                                    get: { selectedSourceApps.contains(appName) },
+                                    set: { isSelected in
+                                        if isSelected {
+                                            selectedSourceApps.insert(appName)
+                                        } else {
+                                            selectedSourceApps.remove(appName)
                                         }
                                     }
-                                }
-                                .frame(maxHeight: 160)
-                            } else {
-                                Text("No source applications available yet.")
-                                    .foregroundColor(.secondary)
-                            }
+                                )
+                            )
                         }
-                    } label: {
-                        Text("Source / Pin")
                     }
+                }
 
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Toggle("Enable date range filter", isOn: $useDateRangeFilter)
-                                .toggleStyle(.switch)
+                Section("Date Range") {
+                    Toggle("Enable date range filter", isOn: $useDateRangeFilter)
 
-                            if useDateRangeFilter {
-                                DatePicker("Oldest date", selection: $startDateFilter, displayedComponents: [.date])
-                                DatePicker("Newest date", selection: $endDateFilter, displayedComponents: [.date])
-                            }
+                    if useDateRangeFilter {
+                        DatePicker("Oldest date", selection: $startDateFilter, displayedComponents: [.date])
+                        DatePicker("Newest date", selection: $endDateFilter, displayedComponents: [.date])
+                    }
+                }
+
+                Section("Text Length") {
+                    Toggle("Enable text length filter", isOn: $useTextLengthFilter)
+
+                    if useTextLengthFilter {
+                        HStack {
+                            Text("Minimum")
+                            Spacer()
+                            TextField("0", value: $minTextLengthFilter, formatter: Self.integerFormatter)
+                                .frame(width: 90)
+                                .multilineTextAlignment(.trailing)
+                                .textFieldStyle(.roundedBorder)
                         }
-                    } label: {
-                        Text("Date Range")
-                    }
 
-                    GroupBox {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Toggle("Enable text length filter", isOn: $useTextLengthFilter)
-                                .toggleStyle(.switch)
-
-                            if useTextLengthFilter {
-                                Stepper(value: $minTextLengthFilter, in: 0...500_000, step: 1) {
-                                    Text("Minimum length: \(minTextLengthFilter)")
-                                }
-                                Stepper(value: $maxTextLengthFilter, in: 0...500_000, step: 1) {
-                                    Text("Maximum length: \(maxTextLengthFilter)")
-                                }
-                                Text("Only text entries are considered when this filter is enabled.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
+                        HStack {
+                            Text("Maximum")
+                            Spacer()
+                            TextField("1000", value: $maxTextLengthFilter, formatter: Self.integerFormatter)
+                                .frame(width: 90)
+                                .multilineTextAlignment(.trailing)
+                                .textFieldStyle(.roundedBorder)
                         }
-                    } label: {
-                        Text("Text Length")
-                    }
 
+                        Text("Only text entries are included when this filter is enabled.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Section {
                     HStack {
                         Text("\(filteredItems.count) filtered entries")
                             .foregroundColor(.secondary)
@@ -592,9 +634,9 @@ extension ContentView {
                         }
                     }
                 }
-                .padding(20)
             }
-            .frame(minWidth: 520, minHeight: 480)
+            .formStyle(.grouped)
+            .frame(minWidth: 560, minHeight: 520)
             .navigationTitle("Filters")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -603,10 +645,18 @@ extension ContentView {
                     }
                 }
             }
+            .onChange(of: minTextLengthFilter) { _, _ in
+                normalizeTextLengthBounds()
+            }
+            .onChange(of: maxTextLengthFilter) { _, _ in
+                normalizeTextLengthBounds()
+            }
         }
     }
 
     private func exportFilteredItemsAsJSON() {
+        refreshAllHistoryItemsIfNeeded()
+
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.json]
         savePanel.canCreateDirectories = true
@@ -656,6 +706,24 @@ extension ContentView {
         useTextLengthFilter = false
         minTextLengthFilter = 0
         maxTextLengthFilter = 1000
+    }
+
+    private func refreshAllHistoryItemsIfNeeded(force: Bool = false) {
+        guard !isPopover else { return }
+        guard force || !hasLoadedAllHistoryItems else { return }
+
+        allHistoryItems = historyStore.loadAllHistoryItemsForFiltering()
+        hasLoadedAllHistoryItems = true
+    }
+
+    private func normalizeTextLengthBounds() {
+        if minTextLengthFilter < 0 {
+            minTextLengthFilter = 0
+        }
+
+        if maxTextLengthFilter < minTextLengthFilter {
+            maxTextLengthFilter = minTextLengthFilter
+        }
     }
 
     private func openSettingsFromPopoverMenu() {

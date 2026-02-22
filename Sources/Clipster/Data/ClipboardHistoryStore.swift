@@ -107,6 +107,11 @@ class ClipboardHistoryStore: ObservableObject {
         return db.searchClipboardItems(query: text, sourceAppName: sourceAppName, limit: 2000)
     }
 
+    /// Loads the full clipboard history for comprehensive in-memory filtering/export.
+    func loadAllHistoryItemsForFiltering() -> [ClipboardItem] {
+        databaseManager.loadAllClipboardItems(includeBlobs: false)
+    }
+
     // MARK: - Public Methods
 
     /// Adds a new item to the top of the history.
