@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var useTextLengthFilter: Bool = false
     @State private var minTextLengthFilter: Int = 0
     @State private var maxTextLengthFilter: Int = 1000
+    @State private var useUnlimitedMaxTextLengthFilter: Bool = false
     @State private var isShowingAdvancedFilters: Bool = false
     @State private var draftSelectedSourceApps: Set<String> = []
     @State private var draftPinnedOnlyFilter: Bool = false
@@ -30,6 +31,7 @@ struct ContentView: View {
     @State private var draftUseTextLengthFilter: Bool = false
     @State private var draftMinTextLengthFilter: Int = 0
     @State private var draftMaxTextLengthFilter: Int = 1000
+    @State private var draftUseUnlimitedMaxTextLengthFilter: Bool = false
     @State private var filterAppMetadata: [String] = []
     @State private var filterOldestDate: Date?
     @State private var filterNewestDate: Date?
@@ -519,9 +521,6 @@ struct ContentView: View {
                 Button("Open Main Window") {
                     openMainWindowFromPopoverMenu()
                 }
-                Button("Open Settings") {
-                    openSettingsFromPopoverMenu()
-                }
                 Divider()
                 Button("Import History...") {
                     historyStore.importHistory(settingsStore: settingsStore)
@@ -636,13 +635,24 @@ extension ContentView {
                                 .textFieldStyle(.roundedBorder)
                         }
 
-                        HStack {
-                            Text("Maximum")
-                            Spacer()
-                            TextField("1000", value: $draftMaxTextLengthFilter, formatter: Self.integerFormatter)
-                                .frame(width: 90)
-                                .multilineTextAlignment(.trailing)
-                                .textFieldStyle(.roundedBorder)
+                        Toggle("Unlimited maximum", isOn: $draftUseUnlimitedMaxTextLengthFilter)
+
+                        if !draftUseUnlimitedMaxTextLengthFilter {
+                            HStack {
+                                Text("Maximum")
+                                Spacer()
+                                TextField("1000", value: $draftMaxTextLengthFilter, formatter: Self.integerFormatter)
+                                    .frame(width: 90)
+                                    .multilineTextAlignment(.trailing)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        } else {
+                            HStack {
+                                Text("Maximum")
+                                Spacer()
+                                Text("Unlimited")
+                                    .foregroundColor(.secondary)
+                            }
                         }
 
                         Text("Only text entries are included when this filter is enabled.")
@@ -693,6 +703,7 @@ extension ContentView {
         draftUseTextLengthFilter = useTextLengthFilter
         draftMinTextLengthFilter = minTextLengthFilter
         draftMaxTextLengthFilter = maxTextLengthFilter
+        draftUseUnlimitedMaxTextLengthFilter = useUnlimitedMaxTextLengthFilter
         normalizeDraftTextLengthBounds()
         isShowingAdvancedFilters = true
         loadFilterMetadataForSheet()
@@ -748,6 +759,7 @@ extension ContentView {
         useTextLengthFilter = draftUseTextLengthFilter
         minTextLengthFilter = draftMinTextLengthFilter
         maxTextLengthFilter = draftMaxTextLengthFilter
+        useUnlimitedMaxTextLengthFilter = draftUseUnlimitedMaxTextLengthFilter
         suspendAutomaticQuery = false
         isShowingAdvancedFilters = false
         runQueryIfNeeded()
@@ -770,6 +782,7 @@ extension ContentView {
         draftUseTextLengthFilter = false
         draftMinTextLengthFilter = 0
         draftMaxTextLengthFilter = 1000
+        draftUseUnlimitedMaxTextLengthFilter = false
     }
 
     private func exportFilteredItemsAsJSON() {
@@ -827,6 +840,7 @@ extension ContentView {
         useTextLengthFilter = false
         minTextLengthFilter = 0
         maxTextLengthFilter = 1000
+        useUnlimitedMaxTextLengthFilter = false
         suspendAutomaticQuery = false
         runQueryIfNeeded()
     }
@@ -836,7 +850,7 @@ extension ContentView {
             draftMinTextLengthFilter = 0
         }
 
-        if draftMaxTextLengthFilter < draftMinTextLengthFilter {
+        if !draftUseUnlimitedMaxTextLengthFilter && draftMaxTextLengthFilter < draftMinTextLengthFilter {
             draftMaxTextLengthFilter = draftMinTextLengthFilter
         }
     }
@@ -863,6 +877,7 @@ extension ContentView {
         let useTextLength = useTextLengthFilter
         let minTextLength = minTextLengthFilter
         let maxTextLength = maxTextLengthFilter
+        let useUnlimitedMaxTextLength = useUnlimitedMaxTextLengthFilter
 
         isRunningQuery = true
         queryTask = Task {
@@ -875,7 +890,8 @@ extension ContentView {
                 endDate: endDate,
                 useTextLength: useTextLength,
                 minTextLength: minTextLength,
-                maxTextLength: maxTextLength
+                maxTextLength: maxTextLength,
+                useUnlimitedMaxTextLength: useUnlimitedMaxTextLength
             )
             guard !Task.isCancelled, requestID == queryRequestID else { return }
             queriedItems = items
@@ -890,24 +906,6 @@ extension ContentView {
         if let lastSelectedItem, !visibleIDs.contains(lastSelectedItem) {
             self.lastSelectedItem = nil
         }
-    }
-
-    private func openSettingsFromPopoverMenu() {
-        let showSettingsAction = {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        }
-
-        if isPopover {
-            closePopoverIfNeeded()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                showSettingsAction()
-            }
-            return
-        }
-
-        showSettingsAction()
     }
 
     private func openMainWindowFromPopoverMenu() {

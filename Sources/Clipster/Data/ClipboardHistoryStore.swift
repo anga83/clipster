@@ -138,7 +138,8 @@ class ClipboardHistoryStore: ObservableObject {
         endDate: Date,
         useTextLength: Bool,
         minTextLength: Int,
-        maxTextLength: Int
+        maxTextLength: Int,
+        useUnlimitedMaxTextLength: Bool
     ) -> [ClipboardItem] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowerDate = min(startDate, endDate)
@@ -156,7 +157,7 @@ class ClipboardHistoryStore: ObservableObject {
             startDate: useDateRange ? startOfDay : nil,
             endDate: useDateRange ? endOfDay : nil,
             minTextLength: useTextLength ? normalizedMinTextLength : nil,
-            maxTextLength: useTextLength ? normalizedMaxTextLength : nil
+            maxTextLength: useTextLength ? (useUnlimitedMaxTextLength ? nil : normalizedMaxTextLength) : nil
         )
     }
 
@@ -169,7 +170,8 @@ class ClipboardHistoryStore: ObservableObject {
         endDate: Date,
         useTextLength: Bool,
         minTextLength: Int,
-        maxTextLength: Int
+        maxTextLength: Int,
+        useUnlimitedMaxTextLength: Bool
     ) async -> [ClipboardItem] {
         let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowerDate = min(startDate, endDate)
@@ -191,7 +193,7 @@ class ClipboardHistoryStore: ObservableObject {
                     startDate: useDateRange ? startOfDay : nil,
                     endDate: useDateRange ? endOfDay : nil,
                     minTextLength: useTextLength ? normalizedMinTextLength : nil,
-                    maxTextLength: useTextLength ? normalizedMaxTextLength : nil
+                    maxTextLength: useTextLength ? (useUnlimitedMaxTextLength ? nil : normalizedMaxTextLength) : nil
                 )
                 continuation.resume(returning: items)
             }

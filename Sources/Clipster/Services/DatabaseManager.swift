@@ -55,12 +55,16 @@ class DatabaseManager {
     // MARK: - Database Connection
     
     private func openDatabase() {
-        if sqlite3_open(dbURL.path, &db) == SQLITE_OK {
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(dbURL.path, &db, flags, nil) == SQLITE_OK {
             // Enable foreign keys
             sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nil, nil, nil)
             
             // Enable WAL mode for better concurrency
             sqlite3_exec(db, "PRAGMA journal_mode = WAL;", nil, nil, nil)
+
+            // Wait briefly for write locks instead of failing immediately under concurrent access.
+            sqlite3_busy_timeout(db, 3000)
             
         } else {
             print("DatabaseManager: Unable to open database, error: \(String(cString: sqlite3_errmsg(db)))")
@@ -688,6 +692,8 @@ class DatabaseManager {
         var items: [ClipboardItem] = []
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            let errorMessage = String(cString: sqlite3_errmsg(db))
+            print("DatabaseManager: queryClipboardItems prepare failed: \(errorMessage)")
             sqlite3_finalize(statement)
             return []
         }
