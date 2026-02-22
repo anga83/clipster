@@ -28,6 +28,7 @@ struct ContentView: View {
     @State private var lastSelectedItem: UUID?      = nil
     @State private var allHistoryItems: [ClipboardItem] = []
     @State private var hasLoadedAllHistoryItems = false
+    @State private var loadedAllHistoryTotalCount = -1
 
     private static let filteredExportDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -58,16 +59,16 @@ struct ContentView: View {
         !selectedSourceApps.isEmpty || pinnedOnlyFilter || useDateRangeFilter || useTextLengthFilter
     }
 
-    private var allItemsForFiltering: [ClipboardItem] {
-        if isPopover {
-            return baseItems
-        }
+    private var shouldUseFullHistoryForFiltering: Bool {
+        !searchText.isEmpty || hasActiveFilters || isShowingAdvancedFilters
+    }
 
-        if hasLoadedAllHistoryItems {
+    private var allItemsForFiltering: [ClipboardItem] {
+        if shouldUseFullHistoryForFiltering && hasLoadedAllHistoryItems {
             return allHistoryItems
         }
 
-        return historyStore.items
+        return baseItems
     }
 
     private var filteredItems: [ClipboardItem] {
@@ -276,6 +277,9 @@ struct ContentView: View {
                             resetFilters()
                         }
 
+                        Divider()
+                        Text("Pinned Filter")
+
                         Button {
                             pinnedOnlyFilter.toggle()
                         } label: {
@@ -288,8 +292,10 @@ struct ContentView: View {
                             }
                         }
 
+                        Divider()
+                        Text("App Filter")
+
                         if !sourceApps.isEmpty {
-                            Divider()
                             ForEach(sourceApps, id: \.self) { appName in
                                 Button {
                                     toggleSourceAppFilter(appName)
@@ -321,13 +327,44 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            refreshAllHistoryItemsIfNeeded()
+            if shouldUseFullHistoryForFiltering {
+                refreshAllHistoryItemsIfNeeded()
+            }
+        }
+        .onChange(of: searchText) { _, newValue in
+            if !newValue.isEmpty {
+                refreshAllHistoryItemsIfNeeded()
+            }
+        }
+        .onChange(of: selectedSourceApps) { _, newValue in
+            if !newValue.isEmpty {
+                refreshAllHistoryItemsIfNeeded()
+            }
+        }
+        .onChange(of: pinnedOnlyFilter) { _, enabled in
+            if enabled {
+                refreshAllHistoryItemsIfNeeded()
+            }
+        }
+        .onChange(of: useDateRangeFilter) { _, enabled in
+            if enabled {
+                refreshAllHistoryItemsIfNeeded()
+            }
+        }
+        .onChange(of: useTextLengthFilter) { _, enabled in
+            if enabled {
+                refreshAllHistoryItemsIfNeeded()
+            }
+        }
+        .onChange(of: isShowingAdvancedFilters) { _, isShowing in
+            if isShowing {
+                refreshAllHistoryItemsIfNeeded()
+            }
         }
         .onChange(of: historyStore.totalItemCount) { _, _ in
-            refreshAllHistoryItemsIfNeeded(force: true)
-        }
-        .onChange(of: historyStore.items) { _, _ in
-            refreshAllHistoryItemsIfNeeded(force: true)
+            if shouldUseFullHistoryForFiltering && hasLoadedAllHistoryItems {
+                refreshAllHistoryItemsIfNeeded(force: true)
+            }
         }
     }
     
@@ -545,11 +582,13 @@ extension ContentView {
     private var advancedFiltersView: some View {
         NavigationStack {
             Form {
-                Section("Source") {
+                Section("Pinned Filter") {
                     Toggle("Pinned only", isOn: $pinnedOnlyFilter)
+                }
 
+                Section("App Filter") {
                     if sourceApps.isEmpty {
-                        Text("No source applications available yet.")
+                        Text("No app entries available yet.")
                             .foregroundColor(.secondary)
                     } else {
                         HStack {
@@ -709,11 +748,14 @@ extension ContentView {
     }
 
     private func refreshAllHistoryItemsIfNeeded(force: Bool = false) {
-        guard !isPopover else { return }
-        guard force || !hasLoadedAllHistoryItems else { return }
+        let latestTotalCount = historyStore.totalItemCount
+        if !force, hasLoadedAllHistoryItems, loadedAllHistoryTotalCount == latestTotalCount {
+            return
+        }
 
         allHistoryItems = historyStore.loadAllHistoryItemsForFiltering()
         hasLoadedAllHistoryItems = true
+        loadedAllHistoryTotalCount = latestTotalCount
     }
 
     private func normalizeTextLengthBounds() {
