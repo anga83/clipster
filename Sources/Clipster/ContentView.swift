@@ -402,8 +402,8 @@ struct ContentView: View {
                 Button("Open Main Window") {
                     openMainWindowFromPopoverMenu()
                 }
-                Button("Clear History...") {
-                    isShowingClearOptions = true
+                Button("Open Settings") {
+                    openSettingsFromPopoverMenu()
                 }
                 Divider()
                 Button("Import History...") {
@@ -431,6 +431,24 @@ struct ContentView: View {
 // MARK: - Selection Mode Functions
 
 extension ContentView {
+    private func openSettingsFromPopoverMenu() {
+        let showSettingsAction = {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        }
+
+        if isPopover {
+            closePopoverIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                showSettingsAction()
+            }
+            return
+        }
+
+        showSettingsAction()
+    }
+
     private func openMainWindowFromPopoverMenu() {
         NSApp.setActivationPolicy(.regular)
         openWindow(id: "main-window")
