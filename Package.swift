@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "Clipster",
     platforms: [
-        .macOS(.v13) // Using macOS 13 for modern SwiftUI features like MenuBarExtra.
+        .macOS("15.0") // Using macOS 15 for modern SwiftUI toolbar APIs.
     ],
     products: [
         .executable(name: "Clipster", targets: ["Clipster"])

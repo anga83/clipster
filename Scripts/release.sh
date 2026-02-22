@@ -16,7 +16,7 @@ NC='\033[0m' # No Color
 APP_NAME="Clipster"
 BUNDLE_ID="com.clipster.app"
 COPYRIGHT="Copyright © 2025 Clipster. All rights reserved."
-MIN_MACOS="13.0"
+MIN_MACOS="15.0"
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
