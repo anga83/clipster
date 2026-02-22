@@ -17,8 +17,23 @@ struct ClipsterApp: App {
     }
 
     private func openMainWindow() {
+        NSApplication.shared.setActivationPolicy(.regular)
         openWindow(id: "main-window")
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func updateActivationPolicyForMainWindowVisibility(isVisible: Bool) {
+        if isVisible {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        if settingsStore.launchAtLogin && !settingsStore.startWithMainWindow {
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            NSApp.setActivationPolicy(.regular)
+        }
     }
     
     private var menuBarExtraScene: some Scene {
@@ -106,17 +121,9 @@ struct ClipsterApp: App {
                     // Set up the app icon when the app is fully loaded
                     setupAppIcon()
 
-                    // Handle dock visibility and auto-opening based on settings
-                    if settingsStore.launchAtLogin && !settingsStore.startWithMainWindow {
-                        // Menu Bar only: hide from dock initially
-                        NSApp.setActivationPolicy(.accessory)
-                        isMainWindowOpen = false
-                    } else {
-                        // Regular app window on launch when desired
-                        NSApp.setActivationPolicy(.regular)
-                        NSApp.activate(ignoringOtherApps: true)
-                        isMainWindowOpen = true
-                    }
+                    // If the main window is visible, the app must be regular to show menu bar entries.
+                    isMainWindowOpen = true
+                    updateActivationPolicyForMainWindowVisibility(isVisible: true)
                 }
                 .onChange(of: settingsStore.enableGlobalShortcut) { enabled in
                     if enabled && globalShortcutService == nil {
@@ -128,9 +135,8 @@ struct ClipsterApp: App {
                     }
                 }
                 .onDisappear {
-                    // Hide from dock when main window is closed
-                    NSApp.setActivationPolicy(.accessory)
                     isMainWindowOpen = false
+                    updateActivationPolicyForMainWindowVisibility(isVisible: false)
                 }
         }
         .commands {

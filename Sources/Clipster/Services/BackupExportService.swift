@@ -73,12 +73,21 @@ final class BackupExportService: @unchecked Sendable {
                 try exportItemsJSON(from: sourceDatabaseURL, to: jsonURL)
             }
 
+            progress("Exporting archive JSON...", 0.36)
+            let archivedURL = stagingDirectoryURL.appendingPathComponent("archived.json")
+            do {
+                try exportArchivedItemsJSON(from: targetDatabaseURL, to: archivedURL)
+            } catch {
+                // Fallback to the source DB if opening the snapshot fails on some systems.
+                try exportArchivedItemsJSON(from: sourceDatabaseURL, to: archivedURL)
+            }
+
             progress("Copying settings...", 0.40)
             if fileManager.fileExists(atPath: settingsFileURL.path) {
                 try fileManager.copyItem(at: settingsFileURL, to: stagingDirectoryURL.appendingPathComponent("settings.plist"))
             }
 
-            progress("Collecting attachments...", 0.50)
+            progress("Collecting attachments...", 0.45)
             if fileManager.fileExists(atPath: attachmentsDirectoryURL.path) {
                 try copyAttachments(
                     from: attachmentsDirectoryURL,
@@ -159,7 +168,7 @@ final class BackupExportService: @unchecked Sendable {
             "createdAt": Self.manifestDateFormatter.string(from: Date()),
             "appVersion": appVersion,
             "appBuild": appBuild,
-            "contents": ["clipster.db", "history.json", "settings.plist", "attachments/"]
+            "contents": ["clipster.db", "history.json", "archived.json", "settings.plist", "attachments/"]
         ]
 
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
@@ -225,15 +234,6 @@ final class BackupExportService: @unchecked Sendable {
     }
 
     private func exportItemsJSON(from databaseURL: URL, to jsonURL: URL) throws {
-        var database: OpaquePointer?
-
-        guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
-            let message = sqliteErrorMessage(from: database)
-            sqlite3_close(database)
-            throw BackupExportError.jsonExportFailure("Cannot open snapshot DB: \(message)")
-        }
-        defer { sqlite3_close(database) }
-
         let sql = """
         SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
                is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
@@ -241,9 +241,57 @@ final class BackupExportService: @unchecked Sendable {
         ORDER BY timestamp DESC;
         """
 
+        let items = try loadItemsFromDatabase(
+            at: databaseURL,
+            sql: sql,
+            timestampColumn: 4,
+            pinnedColumn: 7,
+            missingTableFallbackToEmpty: false
+        )
+        try writeItemsJSON(items, to: jsonURL)
+    }
+
+    private func exportArchivedItemsJSON(from databaseURL: URL, to jsonURL: URL) throws {
+        let sql = """
+        SELECT id, content_type, content_text, content_url, original_timestamp, source_app_bundle_id, source_app_name,
+               was_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+        FROM recently_deleted
+        ORDER BY deleted_timestamp DESC;
+        """
+
+        let items = try loadItemsFromDatabase(
+            at: databaseURL,
+            sql: sql,
+            timestampColumn: 4,
+            pinnedColumn: 7,
+            missingTableFallbackToEmpty: true
+        )
+        try writeItemsJSON(items, to: jsonURL)
+    }
+
+    private func loadItemsFromDatabase(
+        at databaseURL: URL,
+        sql: String,
+        timestampColumn: Int32,
+        pinnedColumn: Int32,
+        missingTableFallbackToEmpty: Bool
+    ) throws -> [ClipboardItem] {
+        var database: OpaquePointer?
+
+        guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            let message = sqliteErrorMessage(from: database)
+            sqlite3_close(database)
+            throw BackupExportError.jsonExportFailure("Cannot open database (\(databaseURL.path)): \(message)")
+        }
+        defer { sqlite3_close(database) }
+
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw BackupExportError.jsonExportFailure("Cannot prepare SELECT statement: \(sqliteErrorMessage(from: database))")
+            let message = sqliteErrorMessage(from: database)
+            if missingTableFallbackToEmpty && message.localizedCaseInsensitiveContains("no such table") {
+                return []
+            }
+            throw BackupExportError.jsonExportFailure("Cannot prepare SELECT statement: \(message)")
         }
         defer { sqlite3_finalize(statement) }
 
@@ -252,64 +300,10 @@ final class BackupExportService: @unchecked Sendable {
         while stepResult == SQLITE_ROW {
             stepResult = sqlite3_step(statement)
             guard stepResult == SQLITE_ROW else { break }
-
-            guard let idCString = sqlite3_column_text(statement, 0) else {
-                throw BackupExportError.jsonExportFailure("Missing item ID in database row")
-            }
-            let idString = String(cString: idCString)
-            guard let uuid = UUID(uuidString: idString) else {
-                throw BackupExportError.jsonExportFailure("Invalid UUID in database row: \(idString)")
-            }
-
-            let contentType = sqlite3_column_int(statement, 1)
-            let content: ClipboardContent
-            if contentType == 0 {
-                guard let textCString = sqlite3_column_text(statement, 2) else {
-                    throw BackupExportError.jsonExportFailure("Missing text content for item \(idString)")
-                }
-                content = .text(String(cString: textCString))
-            } else if contentType == 1 {
-                guard let urlCString = sqlite3_column_text(statement, 3) else {
-                    throw BackupExportError.jsonExportFailure("Missing URL content for item \(idString)")
-                }
-                let urlString = String(cString: urlCString)
-                guard let url = URL(string: urlString) else {
-                    throw BackupExportError.jsonExportFailure("Invalid URL content for item \(idString)")
-                }
-                content = .fileURL(url)
-            } else {
-                throw BackupExportError.jsonExportFailure("Unknown content type \(contentType) for item \(idString)")
-            }
-
-            let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
-            let sourceBundleId = sqlite3_column_text(statement, 5).map { String(cString: $0) }
-            let sourceAppName = sqlite3_column_text(statement, 6).map { String(cString: $0) }
-            let isPinned = sqlite3_column_int(statement, 7) == 1
-            let attachmentData: Data? = {
-                let blob = sqlite3_column_blob(statement, 8)
-                let size = sqlite3_column_bytes(statement, 8)
-                guard let blob, size > 0 else { return nil }
-                return Data(bytes: blob, count: Int(size))
-            }()
-            let attachmentFilename = sqlite3_column_text(statement, 9).map { String(cString: $0) }
-            let attachmentFileExtension = sqlite3_column_text(statement, 10).map { String(cString: $0) }
-            let attachmentUTI = sqlite3_column_text(statement, 11).map { String(cString: $0) }
-            let physicalFilename = sqlite3_column_text(statement, 12).map { String(cString: $0) }
-
-            let item = ClipboardItem(
-                id: uuid,
-                content: content,
-                timestamp: timestamp,
-                isPinned: isPinned,
-                sourceAppBundleIdentifier: sourceBundleId,
-                sourceAppName: sourceAppName,
-                attachmentData: attachmentData,
-                isSymlinked: false,
-                physicalFileName: physicalFilename,
-                hasInlineAttachment: (attachmentData != nil || (physicalFilename == nil && (attachmentFilename != nil || attachmentUTI != nil))),
-                attachmentFilename: attachmentFilename,
-                attachmentFileExtension: attachmentFileExtension,
-                attachmentUTI: attachmentUTI
+            let item = try decodeClipboardItem(
+                from: statement,
+                timestampColumn: timestampColumn,
+                pinnedColumn: pinnedColumn
             )
             items.append(item)
         }
@@ -318,6 +312,79 @@ final class BackupExportService: @unchecked Sendable {
             throw BackupExportError.jsonExportFailure("Cannot iterate DB rows: \(sqliteErrorMessage(from: database))")
         }
 
+        return items
+    }
+
+    private func decodeClipboardItem(
+        from statement: OpaquePointer?,
+        timestampColumn: Int32,
+        pinnedColumn: Int32
+    ) throws -> ClipboardItem {
+        guard let statement else {
+            throw BackupExportError.jsonExportFailure("Missing SQLite statement while decoding item.")
+        }
+
+        guard let idCString = sqlite3_column_text(statement, 0) else {
+            throw BackupExportError.jsonExportFailure("Missing item ID in database row")
+        }
+        let idString = String(cString: idCString)
+        guard let uuid = UUID(uuidString: idString) else {
+            throw BackupExportError.jsonExportFailure("Invalid UUID in database row: \(idString)")
+        }
+
+        let contentType = sqlite3_column_int(statement, 1)
+        let content: ClipboardContent
+        if contentType == 0 {
+            guard let textCString = sqlite3_column_text(statement, 2) else {
+                throw BackupExportError.jsonExportFailure("Missing text content for item \(idString)")
+            }
+            content = .text(String(cString: textCString))
+        } else if contentType == 1 {
+            guard let urlCString = sqlite3_column_text(statement, 3) else {
+                throw BackupExportError.jsonExportFailure("Missing URL content for item \(idString)")
+            }
+            let urlString = String(cString: urlCString)
+            guard let url = URL(string: urlString) else {
+                throw BackupExportError.jsonExportFailure("Invalid URL content for item \(idString)")
+            }
+            content = .fileURL(url)
+        } else {
+            throw BackupExportError.jsonExportFailure("Unknown content type \(contentType) for item \(idString)")
+        }
+
+        let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, timestampColumn))
+        let sourceBundleId = sqlite3_column_text(statement, 5).map { String(cString: $0) }
+        let sourceAppName = sqlite3_column_text(statement, 6).map { String(cString: $0) }
+        let isPinned = sqlite3_column_int(statement, pinnedColumn) == 1
+        let attachmentData: Data? = {
+            let blob = sqlite3_column_blob(statement, 8)
+            let size = sqlite3_column_bytes(statement, 8)
+            guard let blob, size > 0 else { return nil }
+            return Data(bytes: blob, count: Int(size))
+        }()
+        let attachmentFilename = sqlite3_column_text(statement, 9).map { String(cString: $0) }
+        let attachmentFileExtension = sqlite3_column_text(statement, 10).map { String(cString: $0) }
+        let attachmentUTI = sqlite3_column_text(statement, 11).map { String(cString: $0) }
+        let physicalFilename = sqlite3_column_text(statement, 12).map { String(cString: $0) }
+
+        return ClipboardItem(
+            id: uuid,
+            content: content,
+            timestamp: timestamp,
+            isPinned: isPinned,
+            sourceAppBundleIdentifier: sourceBundleId,
+            sourceAppName: sourceAppName,
+            attachmentData: attachmentData,
+            isSymlinked: false,
+            physicalFileName: physicalFilename,
+            hasInlineAttachment: (attachmentData != nil || (physicalFilename == nil && (attachmentFilename != nil || attachmentUTI != nil))),
+            attachmentFilename: attachmentFilename,
+            attachmentFileExtension: attachmentFileExtension,
+            attachmentUTI: attachmentUTI
+        )
+    }
+
+    private func writeItemsJSON(_ items: [ClipboardItem], to jsonURL: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let jsonData = try encoder.encode(items)

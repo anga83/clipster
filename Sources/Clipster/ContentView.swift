@@ -400,18 +400,7 @@ struct ContentView: View {
 
             Menu {
                 Button("Open Main Window") {
-                    openWindow(id: "main-window")
-                    if isPopover {
-                        // Close the menu bar window when opening main window
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            // Find and close any open MenuBarExtra windows
-                            for window in NSApp.windows {
-                                if window.className.contains("MenuBarExtra") {
-                                    window.close()
-                                }
-                            }
-                        }
-                    }
+                    openMainWindowFromPopoverMenu()
                 }
                 Button("Clear History...") {
                     isShowingClearOptions = true
@@ -421,7 +410,7 @@ struct ContentView: View {
                     historyStore.importHistory(settingsStore: settingsStore)
                 }
                 Button("Export History...") {
-                    historyStore.exportHistory(settingsStore: settingsStore)
+                    startExportHistory()
                 }
                 Divider()
                 Button("Quit Clipster", role: .destructive) {
@@ -442,6 +431,44 @@ struct ContentView: View {
 // MARK: - Selection Mode Functions
 
 extension ContentView {
+    private func openMainWindowFromPopoverMenu() {
+        NSApp.setActivationPolicy(.regular)
+        openWindow(id: "main-window")
+        NSApp.activate(ignoringOtherApps: true)
+
+        if isPopover {
+            // Keep the old behavior from v2.3: open window first, then close the menu popover.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                for window in NSApp.windows where window.className.contains("MenuBarExtra") {
+                    window.close()
+                }
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+
+    private func startExportHistory() {
+        if isPopover {
+            closePopoverIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                historyStore.exportHistory(settingsStore: settingsStore)
+            }
+            return
+        }
+
+        historyStore.exportHistory(settingsStore: settingsStore)
+    }
+
+    private func closePopoverIfNeeded() {
+        guard isPopover else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            for window in NSApp.windows where window.className.contains("MenuBarExtra") {
+                window.close()
+            }
+        }
+    }
+
     private func toggleSelectionMode() {
         isSelectionMode.toggle()
         if !isSelectionMode {

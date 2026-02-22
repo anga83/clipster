@@ -113,6 +113,7 @@ struct SettingsView: View {
         .navigationSplitViewStyle(.balanced)
         .navigationSplitViewColumnWidth(min: 240, ideal: 240, max: 240)
         .frame(width: 840, height: 600)
+        .toolbar(.hidden, for: .windowToolbar)
         .navigationTitle("")
         .onChange(of: selectedTab) { newValue in
             debugLogger.log("SettingsView tab changed to \(newValue)", level: .info)
