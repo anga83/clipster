@@ -126,7 +126,7 @@ Scripts/
 
 ## License
 
-Copyright © 2025 Clipster. All rights reserved.
+Copyright © 2026 Clipster. All rights reserved.
 
 ## Changelog
 
