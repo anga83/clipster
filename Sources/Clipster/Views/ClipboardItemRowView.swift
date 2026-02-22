@@ -113,6 +113,13 @@ struct ClipboardItemRowView: View {
         })
         .keyboardShortcut("c", modifiers: .command)
 
+        if case .text(let text) = item.content {
+            Button("Show full text") {
+                print("🔴 DEBUG: Show full text button tapped")
+                previewTextInQuickLook(text: text)
+            }
+        }
+
         if case .fileURL(let url) = item.content {
             Button("Quick Look") {
                 print("🔴 DEBUG: Quick Look button tapped")
@@ -186,6 +193,19 @@ struct ClipboardItemRowView: View {
         }
         
         quickLookURL = previewURL
+    }
+
+    private func previewTextInQuickLook(text: String) {
+        let sanitizedName = item.id.uuidString.replacingOccurrences(of: "-", with: "")
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipster-text-\(sanitizedName).txt")
+
+        do {
+            try text.write(to: tempURL, atomically: true, encoding: .utf8)
+            quickLookURL = tempURL
+        } catch {
+            print("Error creating temporary text file for QuickLook: \(error)")
+        }
     }
     
     private func createFileProviderForSymlink(url: URL) -> NSItemProvider {

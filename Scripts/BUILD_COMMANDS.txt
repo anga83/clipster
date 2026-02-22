@@ -1,0 +1,32 @@
+Clipster Build-/Release-Befehle (ohne Skripte)
+
+Ich verwende aktuell direkte Terminal-Befehle statt der alten Shell-Skripte.
+
+1) Version/Build in Info.plist setzen
+   (Werte in Sources/Clipster/Resources/Info.plist aktualisieren)
+
+   Beispiel 2.5.1 (Build 35):
+   - CFBundleShortVersionString = 2.5.1
+   - CFBundleVersion = 35
+
+2) Release-Binary bauen
+
+   swift build -c release
+
+3) App-Bundle im Release-Ordner erstellen/ersetzen
+
+   set -euo pipefail
+   RELEASE_DIR="Release/Clipster-<VERSION>"
+   APP_DIR="$RELEASE_DIR/Clipster.app"
+   rm -rf "$APP_DIR"
+   mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+   cp ".build/release/Clipster" "$APP_DIR/Contents/MacOS/"
+   chmod +x "$APP_DIR/Contents/MacOS/Clipster"
+   cp "Sources/Clipster/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+   cp -R "Sources/Clipster/Resources/AppIcon.xcassets" "$APP_DIR/Contents/Resources/"
+   cp "Sources/Clipster/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+
+4) Verifikation
+
+   plutil -p "Release/Clipster-<VERSION>/Clipster.app/Contents/Info.plist" | rg "CFBundleShortVersionString|CFBundleVersion|LSMinimumSystemVersion" -n
+   ls -la "Release/Clipster-<VERSION>/Clipster.app/Contents/MacOS/Clipster"
