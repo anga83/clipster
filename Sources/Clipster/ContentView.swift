@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The main view for the Clipster application window.
 struct ContentView: View {
@@ -6,7 +7,6 @@ struct ContentView: View {
     @EnvironmentObject var historyStore: ClipboardHistoryStore
     @EnvironmentObject var settingsStore: SettingsStore
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismiss) private var dismiss
 
     /// Determines if the view is in a popover, which affects UI elements like the settings menu.
     let isPopover: Bool
@@ -14,10 +14,24 @@ struct ContentView: View {
     @State private var isShowingClearAlert: Bool    = false
     @State private var isShowingClearOptions: Bool = false
     @State private var searchText: String           = ""
-    @State private var selectedSourceApp: String?
+    @State private var selectedSourceApps: Set<String> = []
+    @State private var pinnedOnlyFilter: Bool = false
+    @State private var useDateRangeFilter: Bool = false
+    @State private var startDateFilter: Date = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+    @State private var endDateFilter: Date = Date()
+    @State private var useTextLengthFilter: Bool = false
+    @State private var minTextLengthFilter: Int = 0
+    @State private var maxTextLengthFilter: Int = 1000
+    @State private var isShowingAdvancedFilters: Bool = false
     @State private var isSelectionMode: Bool        = false
     @State private var selectedItems: Set<UUID>     = []
     @State private var lastSelectedItem: UUID?      = nil
+
+    private static let filteredExportDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        return formatter
+    }()
 
     // Limit the number of items shown in the Menu Bar popover for responsiveness
     private let popoverMaxItems = 100
@@ -31,25 +45,56 @@ struct ContentView: View {
         return historyStore.items
     }
 
-    private var filteredItems: [ClipboardItem] {
-    // When searching, query the full history from DB to include older items
-    if !searchText.isEmpty {
-        let results = historyStore.searchAllHistory(searchText, sourceAppName: selectedSourceApp)
-        return results.sorted { a, b in
-            if a.isPinned != b.isPinned { return a.isPinned }
-            return a.timestamp > b.timestamp
-        }
+    private var hasActiveFilters: Bool {
+        !selectedSourceApps.isEmpty || pinnedOnlyFilter || useDateRangeFilter || useTextLengthFilter
     }
-    var items = baseItems
 
-        // 1. Filter by source app if one is selected
-        if let selectedApp = selectedSourceApp {
-            items = items.filter { $0.sourceAppName == selectedApp }
+    private var filteredItems: [ClipboardItem] {
+        let sourceItems: [ClipboardItem]
+        if searchText.isEmpty {
+            sourceItems = baseItems
+        } else {
+            // When searching, query the full history from DB to include older items.
+            sourceItems = historyStore.searchAllHistory(searchText, sourceAppName: nil)
         }
 
-        // 2. No in-memory search here; handled above via DB-backed search
-        
-        // 3. Sort results: pinned items first, then by timestamp (newest first)
+        var items = sourceItems
+
+        if !selectedSourceApps.isEmpty {
+            items = items.filter { item in
+                guard let appName = item.sourceAppName else { return false }
+                return selectedSourceApps.contains(appName)
+            }
+        }
+
+        if pinnedOnlyFilter {
+            items = items.filter(\.isPinned)
+        }
+
+        if useDateRangeFilter {
+            let lower = min(startDateFilter, endDateFilter)
+            let upper = max(startDateFilter, endDateFilter)
+            let calendar = Calendar.current
+            let startOfLowerDay = calendar.startOfDay(for: lower)
+            let endOfUpperDay = calendar.date(
+                byAdding: DateComponents(day: 1, second: -1),
+                to: calendar.startOfDay(for: upper)
+            ) ?? upper
+
+            items = items.filter { $0.timestamp >= startOfLowerDay && $0.timestamp <= endOfUpperDay }
+        }
+
+        if useTextLengthFilter {
+            let minLength = max(0, minTextLengthFilter)
+            let maxLength = max(minLength, maxTextLengthFilter)
+
+            items = items.filter { item in
+                guard case .text(let text) = item.content else { return false }
+                return text.count >= minLength && text.count <= maxLength
+            }
+        }
+
+        // Sort results: pinned items first, then by timestamp (newest first)
         return items.sorted { first, second in
             if first.isPinned != second.isPinned {
                 return first.isPinned // Pinned items come first
@@ -59,7 +104,7 @@ struct ContentView: View {
     }
 
     private var sourceApps: [String] {
-    let allApps = baseItems.compactMap { $0.sourceAppName }
+    let allApps = historyStore.items.compactMap { $0.sourceAppName }
         return Array(Set(allApps)).sorted()
     }
 
@@ -69,7 +114,7 @@ struct ContentView: View {
         let monthFormatter = DateFormatter()
         monthFormatter.dateFormat = "MMMM yyyy"
 
-    let groups = Dictionary(grouping: baseItems) { item -> String in
+    let groups = Dictionary(grouping: filteredItems) { item -> String in
             if calendar.isDateInToday(item.timestamp) {
                 return "Today"
             }
@@ -120,6 +165,9 @@ struct ContentView: View {
                 .presentationDetents([.height(520), .large])
                 .presentationDragIndicator(.visible)
         }
+        .sheet(isPresented: $isShowingAdvancedFilters) {
+            advancedFiltersView
+        }
         .toolbar {
             if !isPopover {
                 ToolbarItem(placement: .primaryAction) {
@@ -134,6 +182,14 @@ struct ContentView: View {
                         Label("Export", systemImage: "square.and.arrow.up")
                     }
                     .help("Export a full backup (database, settings, attachments)")
+                }
+
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: { exportFilteredItemsAsJSON() }) {
+                        Label("Export Filtered JSON", systemImage: "square.and.arrow.up.on.square")
+                    }
+                    .disabled(filteredItems.isEmpty)
+                    .help("Export currently filtered entries as JSON")
                 }
 
                 ToolbarItem(placement: .primaryAction) {
@@ -188,20 +244,54 @@ struct ContentView: View {
             }
 
             ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    filterMenuItem(title: "All Apps", value: nil)
-
-                    if !sourceApps.isEmpty {
-                        Divider()
-                        ForEach(sourceApps, id: \.self) { appName in
-                            filterMenuItem(title: appName, value: appName)
+                if isPopover {
+                    Menu {
+                        Button("Reset Filters") {
+                            resetFilters()
                         }
+
+                        Button {
+                            pinnedOnlyFilter.toggle()
+                        } label: {
+                            Label {
+                                Text("Pinned Only")
+                            } icon: {
+                                if pinnedOnlyFilter {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+
+                        if !sourceApps.isEmpty {
+                            Divider()
+                            ForEach(sourceApps, id: \.self) { appName in
+                                Button {
+                                    toggleSourceAppFilter(appName)
+                                } label: {
+                                    Label {
+                                        Text(appName)
+                                    } icon: {
+                                        if selectedSourceApps.contains(appName) {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
+                            .symbolVariant(hasActiveFilters ? .fill : .none)
                     }
-                } label: {
-                    Label("Filter by App", systemImage: "line.3.horizontal.decrease.circle")
-                        .symbolVariant(selectedSourceApp == nil ? .none : .fill)
+                    .help(hasActiveFilters ? "Filters active" : "Filter items")
+                } else {
+                    Button {
+                        isShowingAdvancedFilters = true
+                    } label: {
+                        Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
+                            .symbolVariant(hasActiveFilters ? .fill : .none)
+                    }
+                    .help(hasActiveFilters ? "Edit active filters" : "Open filters")
                 }
-                .help(selectedSourceApp == nil ? "Filter by source app" : "Filtering by: \(selectedSourceApp!)")
             }
         }
     }
@@ -235,7 +325,7 @@ struct ContentView: View {
                 // Use ScrollView + LazyVStack in menu bar to avoid NSTableView reentrancy and heavy list overhead
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
-                        if searchText.isEmpty && selectedSourceApp == nil {
+                        if searchText.isEmpty {
                             ForEach(groupedItems, id: \.title) { group in
                                 Text(group.title)
                                     .font(.headline)
@@ -260,7 +350,7 @@ struct ContentView: View {
                 }
             } else {
                 List {
-                    if searchText.isEmpty && selectedSourceApp == nil {
+                    if searchText.isEmpty {
                         ForEach(groupedItems, id: \.title) { group in
                             Section(header: Text(group.title).font(.headline).padding(.vertical, 4)) {
                                 ForEach(group.items) { item in
@@ -309,26 +399,10 @@ struct ContentView: View {
         }
     }
 
-    /// A helper function to create a consistent menu item for the filter menu.
-    @ViewBuilder
-    private func filterMenuItem(title: String, value: String?) -> some View {
-        Button(action: { selectedSourceApp = value }) {
-            // Using Label with an explicit icon view ensures text alignment
-            // is consistent whether the checkmark is present or not.
-            Label {
-                Text(title)
-            } icon: {
-                if selectedSourceApp == value {
-                    Image(systemName: "checkmark")
-                }
-            }
-        }
-    }
-
     /// The view to display when no items match the current search or filter.
     @ViewBuilder
     private var emptyStateView: some View {
-        if (!searchText.isEmpty || selectedSourceApp != nil) && filteredItems.isEmpty {
+        if (!searchText.isEmpty || hasActiveFilters) && filteredItems.isEmpty {
             VStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 40))
@@ -342,17 +416,18 @@ struct ContentView: View {
 
     /// Provides a descriptive message for why no results are being shown.
     private var noResultsMessage: String {
-        switch (searchText.isEmpty, selectedSourceApp) {
-        case (false, .some(let app)):
-            return "No results for \"\(searchText)\" in \(app)"
-        case (false, .none):
+        if !searchText.isEmpty {
+            if hasActiveFilters {
+                return "No results for \"\(searchText)\" with current filters"
+            }
             return "No results for \"\(searchText)\" found"
-        case (true, .some(let app)):
-            return "No items found from \(app)"
-        case (true, .none):
-            // This case should not be reachable given the display logic.
-            return "No Items Found"
         }
+
+        if hasActiveFilters {
+            return "No items match current filters"
+        }
+
+        return "No Items Found"
     }
 
     private var footer: some View {
@@ -431,6 +506,158 @@ struct ContentView: View {
 // MARK: - Selection Mode Functions
 
 extension ContentView {
+    @ViewBuilder
+    private var advancedFiltersView: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Toggle("Pinned only", isOn: $pinnedOnlyFilter)
+                                .toggleStyle(.switch)
+
+                            if !sourceApps.isEmpty {
+                                Divider()
+                                Text("Apps (\(selectedSourceApps.count) selected)")
+                                    .font(.headline)
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        ForEach(sourceApps, id: \.self) { appName in
+                                            Button {
+                                                toggleSourceAppFilter(appName)
+                                            } label: {
+                                                HStack {
+                                                    Image(systemName: selectedSourceApps.contains(appName) ? "checkmark.circle.fill" : "circle")
+                                                        .foregroundColor(selectedSourceApps.contains(appName) ? .accentColor : .secondary)
+                                                    Text(appName)
+                                                        .foregroundColor(.primary)
+                                                    Spacer()
+                                                }
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 160)
+                            } else {
+                                Text("No source applications available yet.")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    } label: {
+                        Text("Source / Pin")
+                    }
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Toggle("Enable date range filter", isOn: $useDateRangeFilter)
+                                .toggleStyle(.switch)
+
+                            if useDateRangeFilter {
+                                DatePicker("Oldest date", selection: $startDateFilter, displayedComponents: [.date])
+                                DatePicker("Newest date", selection: $endDateFilter, displayedComponents: [.date])
+                            }
+                        }
+                    } label: {
+                        Text("Date Range")
+                    }
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Toggle("Enable text length filter", isOn: $useTextLengthFilter)
+                                .toggleStyle(.switch)
+
+                            if useTextLengthFilter {
+                                Stepper(value: $minTextLengthFilter, in: 0...500_000, step: 1) {
+                                    Text("Minimum length: \(minTextLengthFilter)")
+                                }
+                                Stepper(value: $maxTextLengthFilter, in: 0...500_000, step: 1) {
+                                    Text("Maximum length: \(maxTextLengthFilter)")
+                                }
+                                Text("Only text entries are considered when this filter is enabled.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    } label: {
+                        Text("Text Length")
+                    }
+
+                    HStack {
+                        Text("\(filteredItems.count) filtered entries")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Reset Filters") {
+                            resetFilters()
+                        }
+                    }
+                }
+                .padding(20)
+            }
+            .frame(minWidth: 520, minHeight: 480)
+            .navigationTitle("Filters")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        isShowingAdvancedFilters = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func exportFilteredItemsAsJSON() {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.json]
+        savePanel.canCreateDirectories = true
+        savePanel.title = "Export Filtered Items"
+        savePanel.message = "Save only the entries matching the current filter criteria."
+        let timestamp = Self.filteredExportDateFormatter.string(from: Date())
+        savePanel.nameFieldStringValue = "Clipster-Filtered-\(timestamp).json"
+
+        guard savePanel.runModal() == .OK, let destinationURL = savePanel.url else {
+            return
+        }
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(filteredItems)
+
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+
+            try data.write(to: destinationURL, options: .atomic)
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Filtered JSON Export Failed"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    private func toggleSourceAppFilter(_ appName: String) {
+        if selectedSourceApps.contains(appName) {
+            selectedSourceApps.remove(appName)
+        } else {
+            selectedSourceApps.insert(appName)
+        }
+    }
+
+    private func resetFilters() {
+        selectedSourceApps.removeAll()
+        pinnedOnlyFilter = false
+        useDateRangeFilter = false
+        startDateFilter = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+        endDateFilter = Date()
+        useTextLengthFilter = false
+        minTextLengthFilter = 0
+        maxTextLengthFilter = 1000
+    }
+
     private func openSettingsFromPopoverMenu() {
         let showSettingsAction = {
             NSApp.setActivationPolicy(.regular)
