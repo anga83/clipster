@@ -1,277 +1,264 @@
 # Clipster - Projektdokumentation
 
-## 1. Projektüberblick
-Clipster ist ein in Swift/SwiftUI entwickelter Clipboard-Manager für macOS (ab macOS 15), der primär als Menüleisten-App genutzt wird und optional ein Hauptfenster anbietet.
+Stand: 22.02.2026
 
-Ziel der App:
-- Zwischenablage-Historie dauerhaft speichern
+## 1. Projektüberblick
+Clipster ist ein Clipboard-Manager für macOS (Swift/SwiftUI), der primär als Menüleisten-App läuft und optional ein Hauptfenster anbietet.
+
+Ziele:
+- Zwischenablage-Historie persistent speichern
 - Text und Datei-Referenzen verwalten
-- Elemente durchsuchen, filtern, pinnen und wiederverwenden
-- Daten exportieren/sichern
+- Inhalte schnell suchen, filtern, pinnen und erneut kopieren
+- Historie inklusive Metadaten/Anhängen exportieren
 
 ## 2. Aktueller Versionsstand
-- App-Version: `2.4.1`
-- Build-Nummer: `29`
+- App-Version: `2.5.1`
+- Build-Nummer: `35`
 - Mindest-macOS: `15.0`
-- Quellen:
+- Copyright: `2026`
+- Quelle:
   - `Sources/Clipster/Resources/Info.plist`
-  - `Package.swift`
 
 ## 3. Hauptfunktionen
 
 ### 3.1 Clipboard-Historie
-- Automatisches Monitoring der systemweiten Zwischenablage
+- Polling-basierte Überwachung der systemweiten Zwischenablage
 - Speicherung in SQLite (`clipster.db`)
-- Unterstützung für:
-  - Text-Content
+- Unterstützte Inhalte:
+  - Text
   - Datei-URLs
-- Duplikat-Schutz für direkt aufeinanderfolgende identische Items
+- Duplikat-Schutz für direkt aufeinanderfolgende identische Inhalte
 
-### 3.2 Menüleisten-App + Hauptfenster
-- Menüleisten-Popover mit Suchfeld und Verlaufsliste
-- Optionales Hauptfenster
-- Konfigurierbares Verhalten bei Klick auf das Menüleisten-Icon
-- Wichtige Fokus-/Aktivierungslogik (regressionssensitiv):
-  - Beim Öffnen des Hauptfensters wird die App auf `.regular` aktiviert.
-  - Solange das Hauptfenster sichtbar ist, bleibt die App im `.regular`-Modus (Menüleiste inkl. App-Menü erreichbar).
-  - Beim Schließen des Hauptfensters wird nur dann auf `.accessory` zurückgestellt, wenn `launchAtLogin && !startWithMainWindow`; sonst bleibt `.regular`.
+### 3.2 Menüleisten-App und Hauptfenster
+- Menüleisten-Popover mit Suche, Verlauf und Footer-Menü
+- Optionales Hauptfenster mit erweitertem Workflow
+- Aktivierungs-/Fokuslogik regressionssensitiv:
+  - Beim Öffnen des Hauptfensters wird die App als `.regular` aktiviert.
+  - Das Hauptfenster muss als aktive App im Vordergrund erscheinen.
+  - Menüleisten-App-Modus (`.accessory`) nur im expliziten Menüleisten-Only-Fall.
 
-### 3.3 Suche und Filter
-- Volltextsuche über Historie (DB-gestützt)
-- App-basierter Filter (Source App)
-- Gruppierung nach Zeitabschnitten (Today, This Week, This Month, Monatsgruppen)
+### 3.3 Suche und Filter (aktuelle Architektur)
+Zielkonflikt Performance vs. Vollständigkeit wurde explizit aufgelöst:
 
-### 3.4 Item-Aktionen
-- Anklicken eines Items kopiert es zurück in die Zwischenablage
-- Kontextmenü-Aktionen:
-  - Copy
-  - Quick Look (für Dateien)
-  - Open (Dateien)
-  - Pin/Unpin
-  - Delete
-- Mehrfachauswahl im Hauptfenster inkl. Bulk-Delete
+- Startverhalten:
+  - Initial werden **nicht alle** Items geladen.
+  - Geladen werden: alle gepinnten + eine konfigurierbare Anzahl aktueller ungepinnter Items.
+- Suche/Filter-Verhalten:
+  - Sobald Suche oder aktive Filter greifen, wird die **gesamte DB** abgefragt.
+  - Damit werden auch ältere Einträge gefunden, die nicht im Initial-Subset liegen.
 
-### 3.5 Archiv (Recently Deleted)
-- Soft-Delete in separate SQLite-Tabelle (`recently_deleted`)
-- Wiederherstellen gelöschter Items
+Aktuelle Filterkriterien:
+- Mehrfachauswahl bei Apps (`App Filter`)
+- `Pinned only`
+- Datumsbereich (`Oldest date` bis `Newest date`)
+- Textlänge:
+  - Minimum
+  - Maximum oder `Unlimited maximum` (nur Untergrenze aktiv)
+
+### 3.4 Filter-UX (Apply-Workflow)
+Der Filterdialog im Hauptfenster wurde auf einen performanten Apply-Workflow umgestellt:
+
+1. Klick auf Filter-Button
+2. Es werden nur Metadaten geladen:
+   - eindeutige App-Liste
+   - ältestes/neuestes Datum
+3. Nutzer wählt Filter (Draft-Zustand, noch ohne Query)
+4. Klick auf `Apply`
+5. Erst dann DB-Query mit den exakten Kriterien
+
+Weitere Details:
+- Filterdialog zeigt Ladezustand für Metadaten
+- Keine Vollabfrage beim bloßen Öffnen des Dialogs
+- `Export Filtered JSON` exportiert die aktuell angewendete Query-Menge
+
+### 3.5 Item-Aktionen
+Pro Item (Kontextmenü):
+- `Copy`
+- `Pin/Unpin`
+- `Delete`
+- Datei-Items zusätzlich:
+  - `Quick Look`
+  - `Open`
+- Text-Items zusätzlich:
+  - `Show full text`
+
+`Show full text` öffnet den vollständigen Text in einem großen, scrollbaren QuickLook-Fenster (technisch über temporäre UTF-8-`.txt`-Datei).
+
+### 3.6 Archiv (Recently Deleted)
+- Soft-Delete nach `recently_deleted`
+- Wiederherstellen einzelner Einträge
 - Permanentes Löschen
-- Retention/Cleanup für Text- und Attachment-Archivdaten
-
-### 3.6 Datei-Handling
-- Größenlimits
-- Optionales symlink-basiertes Handling großer Dateien
-- Optionales physisches Speichern von Datei-Inhalten in `attachments/`
-- Datei-Typ-Regeln (`always_symlink`, `save_never`)
+- Retention/Cleanup für Text und Attachments
 
 ### 3.7 Export/Backup
-Export als vollständiges ZIP-Backup mit:
+Vollbackup als ZIP enthält:
 - `clipster.db` (SQLite-Snapshot)
-- `history.json` (aktive Items aus `clipboard_history`)
-- `archived.json` (Archiv-Items aus `recently_deleted`)
+- `history.json` (aktive Historie aus `clipboard_history`)
+- `archived.json` (Archiv aus `recently_deleted`)
 - `settings.plist` (falls vorhanden)
 - `attachments/` (falls vorhanden)
 - `backup-manifest.json`
 
-Ablauf:
-- Während der Vorbereitung wird ein Fortschrittsfenster eingeblendet.
-- Danach öffnet sich ein Speichern-Dialog (`NSSavePanel`).
+Wichtige Semantik:
+- `history.json` bleibt aktive Historie.
+- `archived.json` enthält Archivdaten separat.
 
-Wichtige Details:
-- Startet der Export im Menüleisten-Popover, wird das Popover vor dem eigentlichen Export geschlossen, damit das Fortschrittsfenster sichtbar ist.
-- JSON-Export wird primär aus dem SQLite-Snapshot erzeugt.
-- Fallback: Wenn der Snapshot für JSON nicht gelesen werden kann, wird auf die Original-DB gewechselt.
-- `history.json` bleibt semantisch unverändert (nur aktive Historie). Archivdaten stehen zusätzlich in `archived.json`.
-- Fehlt `recently_deleted` in einer alten DB, wird `archived.json` als leere Liste exportiert (statt hartem Fehler).
+Wichtige UX:
+- Wird Export aus dem Popover gestartet, schließt sich das Popover zuerst, damit das Fortschrittsfenster sichtbar bleibt.
 
-### 3.8 Import
-- Import-Flow ist im `ClipboardHistoryStore` derzeit weiterhin Placeholder.
-- Historischer `PersistenceManager` enthält ältere Import-/Export-Logik (JSON/ZIP), ist aber nicht der aktive Primary-Flow des aktuellen Exports.
+### 3.8 Menüs (aktueller Endstand)
+Menüleisten-Popover (Footer-Gear-Menü):
+- `Open Main Window`
+- `Import History...`
+- `Export History...`
+- `Quit Clipster`
 
-### 3.9 Global Shortcut
-- Optional aktivierbar
-- Shortcut für manuelles Capture (`Option+Command+V` laut UI-Text)
+Bewusst entfernt:
+- `Clear History...`
+- `Open Settings`
 
-### 3.10 UX-Verbesserungen
-- Tooltips für die Top-Bar-Icons im Hauptfenster (Import, Export, Clear, Select)
-- Dynamisches Build-Datum im About-Dialog (aus Binary-Timestamp)
-- Settings-Fenster:
-  - Toolbar-Hintergrund im Fensterkontext ausgeblendet (`toolbarBackgroundVisibility`)
-  - Window-Controls (inkl. Schließen) bleiben erhalten
-  - Benötigt macOS 15 API
+Hinweis: `Clear History` existiert weiterhin als Aktion im Hauptfenster-Toolbar-Workflow.
+
+### 3.9 Settings-UI
+- Obere, inhaltlich unnötige graue Leiste entfernt
+- Mehr Platz für eigentliche Einstellungen
+- Fenster-Controls (inkl. Schließen) bleiben erhalten
 
 ## 4. Technischer Aufbau
 
 ### 4.1 Technologien
-- Swift Package Manager (SPM)
-- SwiftUI
-- AppKit (Panels, Windowing, Pasteboard-nahe Funktionen)
-- SQLite3 (direkt via C-Binding)
+- Swift Package Manager
+- SwiftUI + AppKit
+- SQLite3 via C-Bindings
 
-### 4.2 Projektstruktur
+### 4.2 Relevante Dateien
 - `Sources/Clipster/ClipsterApp.swift`
-  - App-Entry, Szenen, Window/MenuBarExtra, Aktivierungs-/Fokussteuerung
+  - App-Entry, Szenen, Aktivierungslogik
 - `Sources/Clipster/ContentView.swift`
-  - Haupt-UI und Popover-Inhalt (inkl. Export-Start aus Popover)
+  - Haupt-UI, Popover-UI, Filterdialog, Query-Trigger, Export Filtered JSON
+- `Sources/Clipster/Views/ClipboardItemRowView.swift`
+  - Item-Kontextmenü, inkl. `Show full text`
 - `Sources/Clipster/Data/ClipboardHistoryStore.swift`
-  - State-Management, History-Operationen, Export-Start
-- `Sources/Clipster/Data/SettingsStore.swift`
-  - Persistente Settings (`settings.plist`)
+  - Store-Logik, Filter-Metadaten, Filter-Queries, Pin-Handling
 - `Sources/Clipster/Services/DatabaseManager.swift`
-  - SQLite-Schema + CRUD + Archivlogik
-- `Sources/Clipster/Services/ClipboardMonitor.swift`
-  - Polling-basierte Clipboard-Überwachung
+  - SQLite-Schema/CRUD, Query-Bau, DB-Öffnung/Thread-Safety
 - `Sources/Clipster/Services/BackupExportService.swift`
-  - ZIP-Backup-Erstellung (Snapshot, `history.json`, `archived.json`, Manifest)
+  - ZIP-Backup-Aufbereitung
 - `Sources/Clipster/Services/ExportProgressWindowController.swift`
-  - Fortschrittsfenster für Backup-Vorbereitung
-- `Sources/Clipster/Views/*`
-  - UI-Views inkl. Settings, Archive, About, Row-Views
+  - Fortschrittsfenster
 
-### 4.3 Datenablage (lokal)
+### 4.3 Datenablage
 Unter `~/Library/Application Support/Clipster/`:
 - `clipster.db`
 - `settings.plist`
 - `attachments/`
 
-### 4.4 Datenmodell
-- `ClipboardItem` (`Model/ClipboardItem.swift`)
-  - `id`, `content`, `timestamp`, `isPinned`
-  - Source App-Metadaten
-  - Attachment-Metadaten (inline/physisch)
+## 5. Kritische Erkenntnisse und behobene Probleme aus diesem Chat
 
-## 5. Build- und Release-Prozess
+### 5.1 Pin-Persistenz
+Problem:
+- Gepinnte Einträge waren in der UI sichtbar, wurden aber teils nicht persistent in DB gespeichert.
+- Folge: Nach App-Neustart erschienen alle als ungepinnt.
 
-### 5.1 Entwicklung
-- Build: `swift build`
-- Dev-Script: `Scripts/dev.sh`
+Fixes:
+- Robustes Pin-Update in `DatabaseManager.updatePinnedStatus(...)`
+- Sichere String-Bindings
+- Logging, wenn ein Pin-Update 0 Zeilen betrifft (`sqlite3_changes == 0`)
+- Pin/Unpin funktioniert auch für Items außerhalb des initial geladenen Subsets
 
-### 5.2 Release
-- Release-Build: `swift build -c release`
-- App-Bundle wird durch Scripts oder manuell erstellt
+Erkenntnis:
+- Bereits verlorene Pins sind ohne altes Backup im Regelfall nicht zuverlässig rekonstruierbar.
+- Teilweise historische Hinweise können über `recently_deleted.was_pinned` existieren, aber nicht vollständig für aktive Historie.
 
-### 5.3 Plattform- und Bundle-Mindestversion
-- SPM-Target: `Package.swift` mit `.macOS("15.0")`
-- Bundle-Mindestversion: `LSMinimumSystemVersion = 15.0` in `Info.plist`
+### 5.2 Filter-Crash beim Anwenden (EXC_BAD_ACCESS in sqlite3Prepare)
+Beobachtung:
+- Crash auf Background-Queue beim `sqlite3_prepare_v2` während Filter-Query.
 
-### 5.4 Icons
-- Kanonisches App-Icon: `Sources/Clipster/Resources/AppIcon.icns`
-- Asset-Katalog: `Sources/Clipster/Resources/AppIcon.xcassets`
-- `Scripts/generate_app_icon.sh` kopiert das kanonische ICNS an den Zielort und validiert Lesbarkeit
+Fix:
+- DB-Öffnung auf `sqlite3_open_v2(..., SQLITE_OPEN_FULLMUTEX)` umgestellt
+- `sqlite3_busy_timeout(..., 3000)` gesetzt
+- Zusätzliches Fehlerlogging bei `prepare`-Fehlern
 
-### 5.5 Aktuelle Release-Artefakte
-- `Release/Clipster-2.4/Clipster.app`
-- `Release/Clipster-2.4.1/Clipster.app`
-- ältere Release-Verzeichnisse können zusätzlich vorhanden sein
+### 5.3 Filter-Performance
+Problem:
+- Vollhistorie im RAM für Filter führte zu Hängern beim Öffnen/Anpassen.
 
-## 6. Bekannte Hinweise und technische Schulden
+Fix:
+- Metadatenladung getrennt von Ergebnissuche
+- Draft-Filter + explizites `Apply`
+- Query nur bei tatsächlicher Anwendung
+
+### 5.4 Export-Zuverlässigkeit
+- Export enthält jetzt konsistent DB + JSON-Dumps (`history.json`, `archived.json`)
+- Export aus Popover schließt Popover vorher
+- Snapshot-/JSON-Pfade wurden robuster gemacht
+
+## 6. Build- und Release-Prozess (aktuell)
+
+### 6.1 Aktive Vorgehensweise
+Die Release-Erstellung erfolgt derzeit **ohne alte Skripte**, per direkten Shell-Befehlen.
+
+Referenz:
+- `Scripts/BUILD_COMMANDS.txt`
+
+### 6.2 Skriptstruktur
+- Alte Skripte wurden verschoben nach:
+  - `Scripts/old/`
+- Dort liegen u. a.:
+  - `build_release.sh`
+  - `release.sh`
+  - `dev.sh`
+  - `generate_app_icon.sh`
+
+### 6.3 Aktuelle Release-Artefakte
+- `Release/Clipster-2.5/Clipster.app`
+- `Release/Clipster-2.5.1/Clipster.app`
+- ältere Release-Ordner zusätzlich vorhanden
+
+## 7. Regression-sensitive Verhaltensdetails
+
+1. Interner Re-Copy darf kein neues History-Item erzeugen
+- Interne Clipboard-Änderungen werden im Monitor erkannt und ignoriert.
+
+2. Initiale Last gering halten
+- Nicht volle DB laden beim Start.
+- Trotzdem Suche/Filter über gesamte DB gewährleisten.
+
+3. Pinned-Status ist persistenter Wahrheitswert
+- UI darf nicht alleinige Quelle sein.
+- DB-Update muss zuverlässig und prüfbar erfolgen.
+
+4. Filterdialog darf nicht blockieren
+- Nur Metadaten laden beim Öffnen.
+- Ergebnisse erst bei `Apply`.
+
+5. Menubar-Export
+- Popover vorher schließen, damit Fortschrittsfenster sichtbar ist.
+
+## 8. Bekannte technische Schulden
 
 1. Import-Flow
-- Der produktive Import ist weiterhin nicht auf dem neuen Backup-Standard umgesetzt.
+- Import in `ClipboardHistoryStore` ist weiterhin Placeholder.
 
-2. Historischer `PersistenceManager`
-- Enthält teils ältere JSON/ZIP-Pfade.
-- Der produktive Export läuft über `BackupExportService` + `ClipboardHistoryStore.exportHistory`.
+2. Deprecation-Warnings
+- Mehrere `onChange(of:perform:)`-Verwendungen sind deprecated.
 
-3. Deprecation-Warnings
-- Mehrere `onChange(of:perform:)`-Verwendungen sind ab macOS 14 als deprecated markiert.
-- Aktuell Warnungen, keine Build-Blocker.
+3. Concurrency-Warnings
+- `Sendable`-Warnings rund um `DatabaseManager` in async-Kontexten bestehen weiterhin.
 
-4. Release-Skripte
-- Einige Skripte enthalten historisch gewachsene Texte/Defaults.
-- Relevante Release-Werte sind immer mit `Info.plist` und `Package.swift` gegenzuprüfen.
+## 9. QA-Checkliste vor Release
 
-## 7. Wichtige Verhaltensdetails (Regression-sensitive)
+- Pin/Unpin setzen, App neu starten, Persistenz prüfen
+- `Pinned only`-Filter mit vorhandenen Pins prüfen
+- Filterdialog öffnen: keine UI-Hänger
+- Filter anwenden: kein Crash
+- Textlängenfilter mit `Unlimited maximum` prüfen
+- `Show full text` bei langen Texten prüfen
+- Export aus Popover starten: Fortschrittsfenster sichtbar
+- ZIP-Inhalt validieren (`clipster.db`, `history.json`, `archived.json`, Manifest)
 
-1. Interner Copy aus Popover darf kein neues Item erzeugen
-- Beim Kopieren aus der App wird eine interne Notification mit `pasteboard.changeCount` gesendet.
-- `ClipboardMonitor` ignoriert diesen Change gezielt.
-- Relevant:
-  - `Sources/Clipster/App/Notifications.swift`
-  - `Sources/Clipster/Views/ClipboardItemRowView.swift`
-  - `Sources/Clipster/Services/ClipboardMonitor.swift`
-
-2. Item-Counter im Popover
-- `totalItemCount` wird nicht bei jedem Event voll neu geladen.
-- Refresh erfolgt batchweise nach jeweils 10 neu gespeicherten Items.
-- Relevant: `ClipboardHistoryStore`
-
-3. Export aus Popover
-- Popover wird geschlossen, bevor der Export startet.
-- Ziel: Fortschrittsfenster darf nicht vom Popover verdeckt werden.
-
-4. Main-Window-Aktivierung
-- Hauptfenster muss App in `.regular` bringen, damit App-Menü in der macOS-Menüleiste verfügbar ist.
-- Rückschalten auf `.accessory` nur in explizitem Menüleisten-Only-Fall (`launchAtLogin && !startWithMainWindow`) bei geschlossenem Hauptfenster.
-
-5. Backup-Inhalt und JSON-Semantik
-- `history.json`: aktive Historie (`clipboard_history`)
-- `archived.json`: Archiv (`recently_deleted`)
-- Diese Trennung bewusst beibehalten.
-
-6. Launchpad-/Bundle-Icon
-- Entscheidend sind konsistente `Info.plist`-Keys und ein reales `AppIcon.icns` im Bundle.
-
-## 8. Roadmap-Empfehlungen
-- Import auf denselben modernen Backup-Standard heben wie Export
-- Technische Konsolidierung (`PersistenceManager`)
-- Unit-/Integrationstests einführen (mindestens Export/Import und ClipboardMonitor-Deduplizierung)
-- Deprecation-Warnings (`onChange`) auf neue API umstellen
-- Optional Signierung/Notarisierung und Distributionspipeline erweitern
-
----
-
-## 9. LLM-Handover (für ein anderes Modell)
-Dieser Abschnitt enthält projektrelevante Kontextinformationen aus dem bisherigen Verlauf, die nicht selbstverständlich aus dem Code alleine hervorgehen.
-
-### 9.1 Produkt-/Verhaltensanforderungen aus dem Verlauf
-1. Menüleisten-App-First
-- Clipster läuft überwiegend als Menubar-App, Hauptfenster ist ergänzend.
-
-2. Popover-Item-Zähler
-- Realtime ist nicht zwingend erforderlich.
-- Gewünscht: Aktualisierung in sinnvollen Batches (konkret: nach 10 neuen Items).
-
-3. Export-Verhalten
-- Export soll funktionieren aus Hauptfenster und Popover.
-- Exportformat: ZIP aus SQLite-DB + JSON-Dumps + Settings + Attachments.
-- Enthalten: `clipster.db`, `history.json`, `archived.json`, `settings.plist`, `attachments/`, `backup-manifest.json`.
-- Bei längerer Vorbereitung: Fortschrittsfenster anzeigen.
-- Danach Speichern-Dialog anzeigen.
-
-4. Copy-Regression vermeiden
-- Klick auf ein Item im Menubar-Popover darf beim Re-Copy kein neues History-Item erzeugen.
-- Interne Clipboard-Writes müssen im Monitor dedupliziert/ignoriert werden.
-
-5. Hauptfenster-Fokus
-- Beim Öffnen des Hauptfensters muss die App als aktive App in der Menüleiste erscheinen.
-- Nicht dauerhaft im `.accessory`-Modus bleiben, wenn Hauptfenster sichtbar ist.
-
-6. Settings-Fenster
-- Optische Entschlackung im oberen Bereich ist gewünscht, aber ohne Verlust der Window-Controls.
-- Lösung basiert auf macOS-15-Toolbar-API.
-
-### 9.2 Praktische Projektkonventionen aus dem Verlauf
-1. Versions-/Build-Nummer
-- Bei funktionalen Bugfix-Runden wurden Version/Builnummer aktiv hochgezogen.
-- Aktuell: `2.4.1 (29)`.
-
-2. Release-Bundle
-- Zielstruktur typischerweise `Release/Clipster-<version>/Clipster.app`.
-
-3. Icon-Quelle
-- Kanonische Quelle ist `Sources/Clipster/Resources/AppIcon.icns`.
-- Alternative/duplizierte Iconquellen vermeiden.
-
-4. Plattform-Target
-- Mindest-macOS ist auf `15.0` angehoben.
-- SPM-Konfiguration nutzt `.macOS("15.0")`, damit das Manifest mit aktuellem `swift-tools-version` kompatibel bleibt.
-
-### 9.3 Offene Punkte, die ein LLM als Nächstes sauber weiterführen kann
-1. Import modernisieren
-- Den derzeitigen Import-Placeholder in `ClipboardHistoryStore` auf das aktuelle Backupformat angleichen.
-
-2. Testbarkeit
-- Automatisierte Tests für Export-Integrität (`history.json`, `archived.json`, Manifest) ergänzen.
-
-3. API-Modernisierung
-- `onChange`-Verwendungen auf die nicht-deprecated Signatur umstellen.
+## 10. Handover-Kurzfassung
+Für Folgearbeit sind diese Punkte zentral:
+- Architekturentscheidung: Initial-Subset + Full-DB bei Suche/Filter ist bewusst.
+- Pinned-Persistenz und DB-Thread-Safety waren reale Produktionsprobleme und wurden explizit adressiert.
+- Release-Prozess ist derzeit bewusst einfach (direkte Commands), alte Skripte sind archiviert unter `Scripts/old`.
