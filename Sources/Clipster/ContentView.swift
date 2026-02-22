@@ -11,9 +11,8 @@ struct ContentView: View {
     /// Determines if the view is in a popover, which affects UI elements like the settings menu.
     let isPopover: Bool
 
-    @State private var isShowingClearAlert: Bool    = false
     @State private var isShowingClearOptions: Bool = false
-    @State private var searchText: String           = ""
+    @State private var searchText: String = ""
     @State private var selectedSourceApps: Set<String> = []
     @State private var pinnedOnlyFilter: Bool = false
     @State private var useDateRangeFilter: Bool = false
@@ -23,12 +22,28 @@ struct ContentView: View {
     @State private var minTextLengthFilter: Int = 0
     @State private var maxTextLengthFilter: Int = 1000
     @State private var isShowingAdvancedFilters: Bool = false
-    @State private var isSelectionMode: Bool        = false
-    @State private var selectedItems: Set<UUID>     = []
-    @State private var lastSelectedItem: UUID?      = nil
-    @State private var allHistoryItems: [ClipboardItem] = []
-    @State private var hasLoadedAllHistoryItems = false
-    @State private var loadedAllHistoryTotalCount = -1
+    @State private var draftSelectedSourceApps: Set<String> = []
+    @State private var draftPinnedOnlyFilter: Bool = false
+    @State private var draftUseDateRangeFilter: Bool = false
+    @State private var draftStartDateFilter: Date = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+    @State private var draftEndDateFilter: Date = Date()
+    @State private var draftUseTextLengthFilter: Bool = false
+    @State private var draftMinTextLengthFilter: Int = 0
+    @State private var draftMaxTextLengthFilter: Int = 1000
+    @State private var filterAppMetadata: [String] = []
+    @State private var filterOldestDate: Date?
+    @State private var filterNewestDate: Date?
+    @State private var isLoadingFilterMetadata = false
+    @State private var queriedItems: [ClipboardItem] = []
+    @State private var isRunningQuery = false
+    @State private var queryRequestID: Int = 0
+    @State private var metadataRequestID: Int = 0
+    @State private var queryTask: Task<Void, Never>?
+    @State private var metadataTask: Task<Void, Never>?
+    @State private var suspendAutomaticQuery = false
+    @State private var isSelectionMode: Bool = false
+    @State private var selectedItems: Set<UUID> = []
+    @State private var lastSelectedItem: UUID? = nil
 
     private static let filteredExportDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -59,79 +74,26 @@ struct ContentView: View {
         !selectedSourceApps.isEmpty || pinnedOnlyFilter || useDateRangeFilter || useTextLengthFilter
     }
 
-    private var shouldUseFullHistoryForFiltering: Bool {
-        !searchText.isEmpty || hasActiveFilters || isShowingAdvancedFilters
+    private var normalizedSearchText: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var allItemsForFiltering: [ClipboardItem] {
-        if shouldUseFullHistoryForFiltering && hasLoadedAllHistoryItems {
-            return allHistoryItems
-        }
-
-        return baseItems
+    private var shouldUseDatabaseQuery: Bool {
+        !normalizedSearchText.isEmpty || hasActiveFilters
     }
 
     private var filteredItems: [ClipboardItem] {
-        let sourceItems = allItemsForFiltering
-
-        var items = sourceItems
-
-        if !searchText.isEmpty {
-            items = items.filter { item in
-                switch item.content {
-                case .text(let text):
-                    return text.localizedCaseInsensitiveContains(searchText)
-                case .fileURL(let url):
-                    return url.absoluteString.localizedCaseInsensitiveContains(searchText)
-                }
-            }
-        }
-
-        if !selectedSourceApps.isEmpty {
-            items = items.filter { item in
-                guard let appName = item.sourceAppName else { return false }
-                return selectedSourceApps.contains(appName)
-            }
-        }
-
-        if pinnedOnlyFilter {
-            items = items.filter(\.isPinned)
-        }
-
-        if useDateRangeFilter {
-            let lower = min(startDateFilter, endDateFilter)
-            let upper = max(startDateFilter, endDateFilter)
-            let calendar = Calendar.current
-            let startOfLowerDay = calendar.startOfDay(for: lower)
-            let endOfUpperDay = calendar.date(
-                byAdding: DateComponents(day: 1, second: -1),
-                to: calendar.startOfDay(for: upper)
-            ) ?? upper
-
-            items = items.filter { $0.timestamp >= startOfLowerDay && $0.timestamp <= endOfUpperDay }
-        }
-
-        if useTextLengthFilter {
-            let minLength = max(0, minTextLengthFilter)
-            let maxLength = max(minLength, maxTextLengthFilter)
-
-            items = items.filter { item in
-                guard case .text(let text) = item.content else { return false }
-                return text.count >= minLength && text.count <= maxLength
-            }
-        }
-
-        // Sort results: pinned items first, then by timestamp (newest first)
-        return items.sorted { first, second in
+        let sourceItems = shouldUseDatabaseQuery ? queriedItems : baseItems
+        return sourceItems.sorted { first, second in
             if first.isPinned != second.isPinned {
-                return first.isPinned // Pinned items come first
+                return first.isPinned
             }
-            return first.timestamp > second.timestamp // Newest first within same pinned state
+            return first.timestamp > second.timestamp
         }
     }
 
     private var sourceApps: [String] {
-    let allApps = allItemsForFiltering.compactMap { $0.sourceAppName }
+        let allApps = baseItems.compactMap { $0.sourceAppName }
         return Array(Set(allApps)).sorted()
     }
 
@@ -215,7 +177,7 @@ struct ContentView: View {
                     Button(action: { exportFilteredItemsAsJSON() }) {
                         Label("Export Filtered JSON", systemImage: "square.and.arrow.up.on.square")
                     }
-                    .disabled(filteredItems.isEmpty)
+                    .disabled(!shouldUseDatabaseQuery || filteredItems.isEmpty || isRunningQuery)
                     .help("Export currently filtered entries as JSON")
                 }
 
@@ -317,7 +279,7 @@ struct ContentView: View {
                     .help(hasActiveFilters ? "Filters active" : "Filter items")
                 } else {
                     Button {
-                        isShowingAdvancedFilters = true
+                        openAdvancedFiltersSheet()
                     } label: {
                         Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
                             .symbolVariant(hasActiveFilters ? .fill : .none)
@@ -327,44 +289,44 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            if shouldUseFullHistoryForFiltering {
-                refreshAllHistoryItemsIfNeeded()
-            }
+            runQueryIfNeeded()
         }
-        .onChange(of: searchText) { _, newValue in
-            if !newValue.isEmpty {
-                refreshAllHistoryItemsIfNeeded()
-            }
+        .onChange(of: searchText) { _, _ in
+            handleAutomaticQueryUpdate()
         }
-        .onChange(of: selectedSourceApps) { _, newValue in
-            if !newValue.isEmpty {
-                refreshAllHistoryItemsIfNeeded()
-            }
+        .onChange(of: selectedSourceApps) { _, _ in
+            handleAutomaticQueryUpdate()
         }
-        .onChange(of: pinnedOnlyFilter) { _, enabled in
-            if enabled {
-                refreshAllHistoryItemsIfNeeded()
-            }
+        .onChange(of: pinnedOnlyFilter) { _, _ in
+            handleAutomaticQueryUpdate()
         }
-        .onChange(of: useDateRangeFilter) { _, enabled in
-            if enabled {
-                refreshAllHistoryItemsIfNeeded()
-            }
+        .onChange(of: useDateRangeFilter) { _, _ in
+            handleAutomaticQueryUpdate()
         }
-        .onChange(of: useTextLengthFilter) { _, enabled in
-            if enabled {
-                refreshAllHistoryItemsIfNeeded()
-            }
+        .onChange(of: startDateFilter) { _, _ in
+            handleAutomaticQueryUpdate()
         }
-        .onChange(of: isShowingAdvancedFilters) { _, isShowing in
-            if isShowing {
-                refreshAllHistoryItemsIfNeeded()
-            }
+        .onChange(of: endDateFilter) { _, _ in
+            handleAutomaticQueryUpdate()
+        }
+        .onChange(of: useTextLengthFilter) { _, _ in
+            handleAutomaticQueryUpdate()
+        }
+        .onChange(of: minTextLengthFilter) { _, _ in
+            handleAutomaticQueryUpdate()
+        }
+        .onChange(of: maxTextLengthFilter) { _, _ in
+            handleAutomaticQueryUpdate()
         }
         .onChange(of: historyStore.totalItemCount) { _, _ in
-            if shouldUseFullHistoryForFiltering && hasLoadedAllHistoryItems {
-                refreshAllHistoryItemsIfNeeded(force: true)
-            }
+            handleAutomaticQueryUpdate()
+        }
+        .onReceive(historyStore.$items) { _ in
+            handleAutomaticQueryUpdate()
+        }
+        .onDisappear {
+            queryTask?.cancel()
+            metadataTask?.cancel()
         }
     }
     
@@ -397,7 +359,7 @@ struct ContentView: View {
                 // Use ScrollView + LazyVStack in menu bar to avoid NSTableView reentrancy and heavy list overhead
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
-                        if searchText.isEmpty {
+                        if normalizedSearchText.isEmpty {
                             ForEach(groupedItems, id: \.title) { group in
                                 Text(group.title)
                                     .font(.headline)
@@ -422,7 +384,7 @@ struct ContentView: View {
                 }
             } else {
                 List {
-                    if searchText.isEmpty {
+                        if normalizedSearchText.isEmpty {
                         ForEach(groupedItems, id: \.title) { group in
                             Section(header: Text(group.title).font(.headline).padding(.vertical, 4)) {
                                 ForEach(group.items) { item in
@@ -474,7 +436,15 @@ struct ContentView: View {
     /// The view to display when no items match the current search or filter.
     @ViewBuilder
     private var emptyStateView: some View {
-        if (!searchText.isEmpty || hasActiveFilters) && filteredItems.isEmpty {
+        if shouldUseDatabaseQuery && isRunningQuery {
+            VStack(spacing: 10) {
+                ProgressView()
+                Text("Filtering ...")
+                    .font(.headline)
+            }
+            .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if filteredItems.isEmpty {
             VStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 40))
@@ -488,11 +458,11 @@ struct ContentView: View {
 
     /// Provides a descriptive message for why no results are being shown.
     private var noResultsMessage: String {
-        if !searchText.isEmpty {
+        if !normalizedSearchText.isEmpty {
             if hasActiveFilters {
-                return "No results for \"\(searchText)\" with current filters"
+                return "No results for \"\(normalizedSearchText)\" with current filters"
             }
-            return "No results for \"\(searchText)\" found"
+            return "No results for \"\(normalizedSearchText)\" found"
         }
 
         if hasActiveFilters {
@@ -582,42 +552,55 @@ extension ContentView {
     private var advancedFiltersView: some View {
         NavigationStack {
             Form {
+                if isLoadingFilterMetadata {
+                    Section {
+                        HStack(spacing: 8) {
+                            Spacer()
+                            ProgressView()
+                            Text("Loading filter metadata ...")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
                 Section("Pinned Filter") {
-                    Toggle("Pinned only", isOn: $pinnedOnlyFilter)
+                    Toggle("Pinned only", isOn: $draftPinnedOnlyFilter)
                 }
 
                 Section("App Filter") {
-                    if sourceApps.isEmpty {
-                        Text("No app entries available yet.")
+                    if filterAppMetadata.isEmpty {
+                        Text(isLoadingFilterMetadata ? "Loading app list ..." : "No app entries available yet.")
                             .foregroundColor(.secondary)
                     } else {
                         HStack {
                             Button("Select all apps") {
-                                selectedSourceApps = Set(sourceApps)
+                                draftSelectedSourceApps = Set(filterAppMetadata)
                             }
                             .buttonStyle(.link)
 
                             Button("Clear app selection") {
-                                selectedSourceApps.removeAll()
+                                draftSelectedSourceApps.removeAll()
                             }
                             .buttonStyle(.link)
 
                             Spacer()
 
-                            Text("\(selectedSourceApps.count) selected")
+                            Text("\(draftSelectedSourceApps.count) selected")
                                 .foregroundColor(.secondary)
                         }
 
-                        ForEach(sourceApps, id: \.self) { appName in
+                        ForEach(filterAppMetadata, id: \.self) { appName in
                             Toggle(
                                 appName,
                                 isOn: Binding(
-                                    get: { selectedSourceApps.contains(appName) },
+                                    get: { draftSelectedSourceApps.contains(appName) },
                                     set: { isSelected in
                                         if isSelected {
-                                            selectedSourceApps.insert(appName)
+                                            draftSelectedSourceApps.insert(appName)
                                         } else {
-                                            selectedSourceApps.remove(appName)
+                                            draftSelectedSourceApps.remove(appName)
                                         }
                                     }
                                 )
@@ -627,22 +610,27 @@ extension ContentView {
                 }
 
                 Section("Date Range") {
-                    Toggle("Enable date range filter", isOn: $useDateRangeFilter)
+                    Toggle("Enable date range filter", isOn: $draftUseDateRangeFilter)
 
-                    if useDateRangeFilter {
-                        DatePicker("Oldest date", selection: $startDateFilter, displayedComponents: [.date])
-                        DatePicker("Newest date", selection: $endDateFilter, displayedComponents: [.date])
+                    if draftUseDateRangeFilter {
+                        if let oldest = filterOldestDate, let newest = filterNewestDate {
+                            DatePicker("Oldest date", selection: $draftStartDateFilter, in: oldest...newest, displayedComponents: [.date])
+                            DatePicker("Newest date", selection: $draftEndDateFilter, in: oldest...newest, displayedComponents: [.date])
+                        } else {
+                            DatePicker("Oldest date", selection: $draftStartDateFilter, displayedComponents: [.date])
+                            DatePicker("Newest date", selection: $draftEndDateFilter, displayedComponents: [.date])
+                        }
                     }
                 }
 
                 Section("Text Length") {
-                    Toggle("Enable text length filter", isOn: $useTextLengthFilter)
+                    Toggle("Enable text length filter", isOn: $draftUseTextLengthFilter)
 
-                    if useTextLengthFilter {
+                    if draftUseTextLengthFilter {
                         HStack {
                             Text("Minimum")
                             Spacer()
-                            TextField("0", value: $minTextLengthFilter, formatter: Self.integerFormatter)
+                            TextField("0", value: $draftMinTextLengthFilter, formatter: Self.integerFormatter)
                                 .frame(width: 90)
                                 .multilineTextAlignment(.trailing)
                                 .textFieldStyle(.roundedBorder)
@@ -651,7 +639,7 @@ extension ContentView {
                         HStack {
                             Text("Maximum")
                             Spacer()
-                            TextField("1000", value: $maxTextLengthFilter, formatter: Self.integerFormatter)
+                            TextField("1000", value: $draftMaxTextLengthFilter, formatter: Self.integerFormatter)
                                 .frame(width: 90)
                                 .multilineTextAlignment(.trailing)
                                 .textFieldStyle(.roundedBorder)
@@ -669,32 +657,125 @@ extension ContentView {
                             .foregroundColor(.secondary)
                         Spacer()
                         Button("Reset Filters") {
-                            resetFilters()
+                            resetDraftFilters()
                         }
+                        Button("Apply") {
+                            applyDraftFilters()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isRunningQuery)
                     }
                 }
             }
             .formStyle(.grouped)
             .frame(minWidth: 560, minHeight: 520)
             .navigationTitle("Filters")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") {
-                        isShowingAdvancedFilters = false
-                    }
-                }
+            .onChange(of: draftMinTextLengthFilter) { _, _ in
+                normalizeDraftTextLengthBounds()
             }
-            .onChange(of: minTextLengthFilter) { _, _ in
-                normalizeTextLengthBounds()
-            }
-            .onChange(of: maxTextLengthFilter) { _, _ in
-                normalizeTextLengthBounds()
+            .onChange(of: draftMaxTextLengthFilter) { _, _ in
+                normalizeDraftTextLengthBounds()
             }
         }
     }
 
+    private func handleAutomaticQueryUpdate() {
+        guard !suspendAutomaticQuery else { return }
+        runQueryIfNeeded()
+    }
+
+    private func openAdvancedFiltersSheet() {
+        draftSelectedSourceApps = selectedSourceApps
+        draftPinnedOnlyFilter = pinnedOnlyFilter
+        draftUseDateRangeFilter = useDateRangeFilter
+        draftStartDateFilter = startDateFilter
+        draftEndDateFilter = endDateFilter
+        draftUseTextLengthFilter = useTextLengthFilter
+        draftMinTextLengthFilter = minTextLengthFilter
+        draftMaxTextLengthFilter = maxTextLengthFilter
+        normalizeDraftTextLengthBounds()
+        isShowingAdvancedFilters = true
+        loadFilterMetadataForSheet()
+    }
+
+    private func loadFilterMetadataForSheet() {
+        metadataTask?.cancel()
+        metadataRequestID += 1
+        let requestID = metadataRequestID
+        isLoadingFilterMetadata = true
+
+        metadataTask = Task {
+            let metadata = await historyStore.loadFilterMetadataAsync()
+            guard !Task.isCancelled, requestID == metadataRequestID else { return }
+            filterAppMetadata = metadata.appNames
+            filterOldestDate = metadata.oldestDate
+            filterNewestDate = metadata.newestDate
+            seedDraftDateRangeIfNeeded()
+            isLoadingFilterMetadata = false
+        }
+    }
+
+    private func seedDraftDateRangeIfNeeded() {
+        guard let oldest = filterOldestDate, let newest = filterNewestDate else { return }
+
+        if !draftUseDateRangeFilter {
+            draftStartDateFilter = oldest
+            draftEndDateFilter = newest
+            return
+        }
+
+        if draftStartDateFilter < oldest {
+            draftStartDateFilter = oldest
+        } else if draftStartDateFilter > newest {
+            draftStartDateFilter = newest
+        }
+
+        if draftEndDateFilter > newest {
+            draftEndDateFilter = newest
+        } else if draftEndDateFilter < oldest {
+            draftEndDateFilter = oldest
+        }
+    }
+
+    private func applyDraftFilters() {
+        normalizeDraftTextLengthBounds()
+        suspendAutomaticQuery = true
+        selectedSourceApps = draftSelectedSourceApps
+        pinnedOnlyFilter = draftPinnedOnlyFilter
+        useDateRangeFilter = draftUseDateRangeFilter
+        startDateFilter = draftStartDateFilter
+        endDateFilter = draftEndDateFilter
+        useTextLengthFilter = draftUseTextLengthFilter
+        minTextLengthFilter = draftMinTextLengthFilter
+        maxTextLengthFilter = draftMaxTextLengthFilter
+        suspendAutomaticQuery = false
+        isShowingAdvancedFilters = false
+        runQueryIfNeeded()
+    }
+
+    private func resetDraftFilters() {
+        draftSelectedSourceApps.removeAll()
+        draftPinnedOnlyFilter = false
+        draftUseDateRangeFilter = false
+        if let oldest = filterOldestDate {
+            draftStartDateFilter = oldest
+        } else {
+            draftStartDateFilter = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+        }
+        if let newest = filterNewestDate {
+            draftEndDateFilter = newest
+        } else {
+            draftEndDateFilter = Date()
+        }
+        draftUseTextLengthFilter = false
+        draftMinTextLengthFilter = 0
+        draftMaxTextLengthFilter = 1000
+    }
+
     private func exportFilteredItemsAsJSON() {
-        refreshAllHistoryItemsIfNeeded()
+        guard shouldUseDatabaseQuery, !filteredItems.isEmpty else {
+            return
+        }
 
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.json]
@@ -737,6 +818,7 @@ extension ContentView {
     }
 
     private func resetFilters() {
+        suspendAutomaticQuery = true
         selectedSourceApps.removeAll()
         pinnedOnlyFilter = false
         useDateRangeFilter = false
@@ -745,26 +827,68 @@ extension ContentView {
         useTextLengthFilter = false
         minTextLengthFilter = 0
         maxTextLengthFilter = 1000
+        suspendAutomaticQuery = false
+        runQueryIfNeeded()
     }
 
-    private func refreshAllHistoryItemsIfNeeded(force: Bool = false) {
-        let latestTotalCount = historyStore.totalItemCount
-        if !force, hasLoadedAllHistoryItems, loadedAllHistoryTotalCount == latestTotalCount {
+    private func normalizeDraftTextLengthBounds() {
+        if draftMinTextLengthFilter < 0 {
+            draftMinTextLengthFilter = 0
+        }
+
+        if draftMaxTextLengthFilter < draftMinTextLengthFilter {
+            draftMaxTextLengthFilter = draftMinTextLengthFilter
+        }
+    }
+
+    private func runQueryIfNeeded() {
+        guard shouldUseDatabaseQuery else {
+            queryTask?.cancel()
+            queryRequestID += 1
+            isRunningQuery = false
+            queriedItems = []
+            pruneSelectionToVisibleItems(in: filteredItems)
             return
         }
 
-        allHistoryItems = historyStore.loadAllHistoryItemsForFiltering()
-        hasLoadedAllHistoryItems = true
-        loadedAllHistoryTotalCount = latestTotalCount
+        queryTask?.cancel()
+        queryRequestID += 1
+        let requestID = queryRequestID
+        let queryText = normalizedSearchText
+        let sourceApps = selectedSourceApps
+        let pinnedOnly = pinnedOnlyFilter
+        let useDateRange = useDateRangeFilter
+        let startDate = startDateFilter
+        let endDate = endDateFilter
+        let useTextLength = useTextLengthFilter
+        let minTextLength = minTextLengthFilter
+        let maxTextLength = maxTextLengthFilter
+
+        isRunningQuery = true
+        queryTask = Task {
+            let items = await historyStore.queryHistoryForFiltersAsync(
+                searchText: queryText,
+                sourceAppNames: sourceApps,
+                pinnedOnly: pinnedOnly,
+                useDateRange: useDateRange,
+                startDate: startDate,
+                endDate: endDate,
+                useTextLength: useTextLength,
+                minTextLength: minTextLength,
+                maxTextLength: maxTextLength
+            )
+            guard !Task.isCancelled, requestID == queryRequestID else { return }
+            queriedItems = items
+            isRunningQuery = false
+            pruneSelectionToVisibleItems(in: filteredItems)
+        }
     }
 
-    private func normalizeTextLengthBounds() {
-        if minTextLengthFilter < 0 {
-            minTextLengthFilter = 0
-        }
-
-        if maxTextLengthFilter < minTextLengthFilter {
-            maxTextLengthFilter = minTextLengthFilter
+    private func pruneSelectionToVisibleItems(in currentItems: [ClipboardItem]) {
+        let visibleIDs = Set(currentItems.map(\.id))
+        selectedItems = selectedItems.intersection(visibleIDs)
+        if let lastSelectedItem, !visibleIDs.contains(lastSelectedItem) {
+            self.lastSelectedItem = nil
         }
     }
 

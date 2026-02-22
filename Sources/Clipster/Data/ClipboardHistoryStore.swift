@@ -7,6 +7,12 @@ import UniformTypeIdentifiers
 /// This class is an `ObservableObject` to allow SwiftUI views to react to its changes.
 @MainActor
 class ClipboardHistoryStore: ObservableObject {
+    struct FilterMetadata {
+        let appNames: [String]
+        let oldestDate: Date?
+        let newestDate: Date?
+    }
+
     @Published var items: [ClipboardItem] = []
     @Published var isInitialLoadComplete: Bool = false
     @Published var totalItemCount: Int = 0
@@ -107,9 +113,89 @@ class ClipboardHistoryStore: ObservableObject {
         return db.searchClipboardItems(query: text, sourceAppName: sourceAppName, limit: 2000)
     }
 
-    /// Loads the full clipboard history for comprehensive in-memory filtering/export.
-    func loadAllHistoryItemsForFiltering() -> [ClipboardItem] {
-        databaseManager.loadAllClipboardItems(includeBlobs: false)
+    func loadFilterMetadata() -> FilterMetadata {
+        let meta = databaseManager.loadFilterMetadata()
+        return FilterMetadata(appNames: meta.appNames, oldestDate: meta.oldestDate, newestDate: meta.newestDate)
+    }
+
+    func loadFilterMetadataAsync() async -> FilterMetadata {
+        let db = databaseManager
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let meta = db.loadFilterMetadata()
+                let result = FilterMetadata(appNames: meta.appNames, oldestDate: meta.oldestDate, newestDate: meta.newestDate)
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func queryHistoryForFilters(
+        searchText: String,
+        sourceAppNames: Set<String>,
+        pinnedOnly: Bool,
+        useDateRange: Bool,
+        startDate: Date,
+        endDate: Date,
+        useTextLength: Bool,
+        minTextLength: Int,
+        maxTextLength: Int
+    ) -> [ClipboardItem] {
+        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerDate = min(startDate, endDate)
+        let upperDate = max(startDate, endDate)
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: lowerDate)
+        let endOfDay = calendar.date(byAdding: DateComponents(day: 1, second: -1), to: calendar.startOfDay(for: upperDate)) ?? upperDate
+        let normalizedMinTextLength = max(0, minTextLength)
+        let normalizedMaxTextLength = max(normalizedMinTextLength, maxTextLength)
+
+        return databaseManager.queryClipboardItems(
+            searchText: normalizedSearchText,
+            sourceAppNames: Array(sourceAppNames),
+            pinnedOnly: pinnedOnly,
+            startDate: useDateRange ? startOfDay : nil,
+            endDate: useDateRange ? endOfDay : nil,
+            minTextLength: useTextLength ? normalizedMinTextLength : nil,
+            maxTextLength: useTextLength ? normalizedMaxTextLength : nil
+        )
+    }
+
+    func queryHistoryForFiltersAsync(
+        searchText: String,
+        sourceAppNames: Set<String>,
+        pinnedOnly: Bool,
+        useDateRange: Bool,
+        startDate: Date,
+        endDate: Date,
+        useTextLength: Bool,
+        minTextLength: Int,
+        maxTextLength: Int
+    ) async -> [ClipboardItem] {
+        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerDate = min(startDate, endDate)
+        let upperDate = max(startDate, endDate)
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: lowerDate)
+        let endOfDay = calendar.date(byAdding: DateComponents(day: 1, second: -1), to: calendar.startOfDay(for: upperDate)) ?? upperDate
+        let normalizedMinTextLength = max(0, minTextLength)
+        let normalizedMaxTextLength = max(normalizedMinTextLength, maxTextLength)
+        let selectedApps = Array(sourceAppNames)
+        let db = databaseManager
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let items = db.queryClipboardItems(
+                    searchText: normalizedSearchText,
+                    sourceAppNames: selectedApps,
+                    pinnedOnly: pinnedOnly,
+                    startDate: useDateRange ? startOfDay : nil,
+                    endDate: useDateRange ? endOfDay : nil,
+                    minTextLength: useTextLength ? normalizedMinTextLength : nil,
+                    maxTextLength: useTextLength ? normalizedMaxTextLength : nil
+                )
+                continuation.resume(returning: items)
+            }
+        }
     }
 
     // MARK: - Public Methods
@@ -189,27 +275,38 @@ class ClipboardHistoryStore: ObservableObject {
 
     /// Toggles pin status for an item
     func togglePin(for item: ClipboardItem) {
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-        
-        items[index].isPinned.toggle()
-        databaseManager.updatePinnedStatus(itemId: item.id, isPinned: items[index].isPinned)
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            items[index].isPinned.toggle()
+            databaseManager.updatePinnedStatus(itemId: item.id, isPinned: items[index].isPinned)
+        } else {
+            // Item can come from full-history search/filter query and may not be in the initial in-memory subset.
+            databaseManager.updatePinnedStatus(itemId: item.id, isPinned: !item.isPinned)
+            // Refresh merged initial view so newly pinned/unpinned items are reflected after this action.
+            loadItemsFromDatabase()
+        }
         print("ClipboardHistoryStore: Toggled pin for item \(item.id)")
     }
 
     /// Pins an item
     func pinItem(withId id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        
-        items[index].isPinned = true
+        if let index = items.firstIndex(where: { $0.id == id }) {
+            items[index].isPinned = true
+        }
         databaseManager.updatePinnedStatus(itemId: id, isPinned: true)
+        if !items.contains(where: { $0.id == id }) {
+            loadItemsFromDatabase()
+        }
     }
 
     /// Unpins an item
     func unpinItem(withId id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        
-        items[index].isPinned = false
+        if let index = items.firstIndex(where: { $0.id == id }) {
+            items[index].isPinned = false
+        }
         databaseManager.updatePinnedStatus(itemId: id, isPinned: false)
+        if !items.contains(where: { $0.id == id }) {
+            loadItemsFromDatabase()
+        }
     }
 
     /// Clears all non-pinned items

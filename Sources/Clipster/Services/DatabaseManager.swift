@@ -247,6 +247,24 @@ class DatabaseManager {
             sqlite3_bind_null(statement, index)
         }
     }
+
+    // Helper method for safe blob binding with SQLITE_TRANSIENT
+    private func bindBlob(_ statement: OpaquePointer?, _ data: Data?, at index: Int32) {
+        guard let data else {
+            sqlite3_bind_null(statement, index)
+            return
+        }
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        _ = data.withUnsafeBytes { rawBufferPointer in
+            sqlite3_bind_blob(
+                statement,
+                index,
+                rawBufferPointer.bindMemory(to: UInt8.self).baseAddress,
+                Int32(data.count),
+                SQLITE_TRANSIENT
+            )
+        }
+    }
     
     func insertClipboardItem(_ item: ClipboardItem) {
         debugLogger.logFunctionEntry()
@@ -300,35 +318,11 @@ class DatabaseManager {
             sqlite3_bind_int(statement, 8, item.isPinned ? 1 : 0)
             
             // Attachment data
-            if let attachmentData = item.attachmentData {
-                sqlite3_bind_blob(statement, 9, attachmentData.withUnsafeBytes { $0.bindMemory(to: UInt8.self).baseAddress }, Int32(attachmentData.count), nil)
-            } else {
-                sqlite3_bind_null(statement, 9)
-            }
-            
-            if let filename = item.attachmentFilename {
-                sqlite3_bind_text(statement, 10, filename, -1, nil)
-            } else {
-                sqlite3_bind_null(statement, 10)
-            }
-            
-            if let ext = item.attachmentFileExtension {
-                sqlite3_bind_text(statement, 11, ext, -1, nil)
-            } else {
-                sqlite3_bind_null(statement, 11)
-            }
-            
-            if let uti = item.attachmentUTI {
-                sqlite3_bind_text(statement, 12, uti, -1, nil)
-            } else {
-                sqlite3_bind_null(statement, 12)
-            }
-            
-            if let physicalFilename = item.physicalFileName {
-                sqlite3_bind_text(statement, 13, physicalFilename, -1, nil)
-            } else {
-                sqlite3_bind_null(statement, 13)
-            }
+            bindBlob(statement, item.attachmentData, at: 9)
+            bindString(statement, item.attachmentFilename, at: 10)
+            bindString(statement, item.attachmentFileExtension, at: 11)
+            bindString(statement, item.attachmentUTI, at: 12)
+            bindString(statement, item.physicalFileName, at: 13)
             
             debugLogger.logDatabaseOperation("All parameters bound, executing statement")
             
@@ -576,6 +570,146 @@ class DatabaseManager {
                 if let item = createClipboardItemFromRowLight(statement: statement) { items.append(item) }
             }
         }
+        sqlite3_finalize(statement)
+        return items
+    }
+
+    func loadFilterMetadata() -> (appNames: [String], oldestDate: Date?, newestDate: Date?) {
+        var appNames: [String] = []
+        var appStatement: OpaquePointer?
+        let appsSQL = """
+        SELECT DISTINCT source_app_name
+        FROM clipboard_history
+        WHERE source_app_name IS NOT NULL AND source_app_name != ''
+        ORDER BY source_app_name COLLATE NOCASE ASC;
+        """
+
+        if sqlite3_prepare_v2(db, appsSQL, -1, &appStatement, nil) == SQLITE_OK {
+            while sqlite3_step(appStatement) == SQLITE_ROW {
+                if let appNameCString = sqlite3_column_text(appStatement, 0) {
+                    appNames.append(String(cString: appNameCString))
+                }
+            }
+        }
+        sqlite3_finalize(appStatement)
+
+        var oldestDate: Date?
+        var newestDate: Date?
+        var rangeStatement: OpaquePointer?
+        let rangeSQL = "SELECT MIN(timestamp), MAX(timestamp) FROM clipboard_history;"
+        if sqlite3_prepare_v2(db, rangeSQL, -1, &rangeStatement, nil) == SQLITE_OK,
+           sqlite3_step(rangeStatement) == SQLITE_ROW {
+            if sqlite3_column_type(rangeStatement, 0) != SQLITE_NULL {
+                oldestDate = Date(timeIntervalSince1970: sqlite3_column_double(rangeStatement, 0))
+            }
+            if sqlite3_column_type(rangeStatement, 1) != SQLITE_NULL {
+                newestDate = Date(timeIntervalSince1970: sqlite3_column_double(rangeStatement, 1))
+            }
+        }
+        sqlite3_finalize(rangeStatement)
+
+        return (appNames: appNames, oldestDate: oldestDate, newestDate: newestDate)
+    }
+
+    func queryClipboardItems(
+        searchText: String,
+        sourceAppNames: [String],
+        pinnedOnly: Bool,
+        startDate: Date?,
+        endDate: Date?,
+        minTextLength: Int?,
+        maxTextLength: Int?
+    ) -> [ClipboardItem] {
+        enum QueryParameter {
+            case text(String)
+            case int(Int)
+            case double(Double)
+        }
+
+        var sql = """
+        SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
+               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+        FROM clipboard_history
+        """
+
+        var whereClauses: [String] = []
+        var parameters: [QueryParameter] = []
+
+        if !searchText.isEmpty {
+            whereClauses.append("(content_text LIKE ? ESCAPE '\\\\' OR content_url LIKE ? ESCAPE '\\\\')")
+            let pattern = "%\(escapeLike(searchText))%"
+            parameters.append(.text(pattern))
+            parameters.append(.text(pattern))
+        }
+
+        if !sourceAppNames.isEmpty {
+            let placeholders = Array(repeating: "?", count: sourceAppNames.count).joined(separator: ", ")
+            whereClauses.append("source_app_name IN (\(placeholders))")
+            for appName in sourceAppNames.sorted() {
+                parameters.append(.text(appName))
+            }
+        }
+
+        if pinnedOnly {
+            whereClauses.append("is_pinned = 1")
+        }
+
+        if let startDate {
+            whereClauses.append("timestamp >= ?")
+            parameters.append(.double(startDate.timeIntervalSince1970))
+        }
+
+        if let endDate {
+            whereClauses.append("timestamp <= ?")
+            parameters.append(.double(endDate.timeIntervalSince1970))
+        }
+
+        let hasTextLengthFilter = minTextLength != nil || maxTextLength != nil
+        if hasTextLengthFilter {
+            whereClauses.append("content_type = 0")
+        }
+
+        if let minTextLength {
+            whereClauses.append("LENGTH(COALESCE(content_text, '')) >= ?")
+            parameters.append(.int(max(0, minTextLength)))
+        }
+
+        if let maxTextLength {
+            whereClauses.append("LENGTH(COALESCE(content_text, '')) <= ?")
+            parameters.append(.int(max(0, maxTextLength)))
+        }
+
+        if !whereClauses.isEmpty {
+            sql += " WHERE " + whereClauses.joined(separator: " AND ")
+        }
+
+        sql += " ORDER BY timestamp DESC;"
+
+        var items: [ClipboardItem] = []
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            sqlite3_finalize(statement)
+            return []
+        }
+
+        for (index, parameter) in parameters.enumerated() {
+            let parameterIndex = Int32(index + 1)
+            switch parameter {
+            case .text(let value):
+                bindString(statement, value, at: parameterIndex)
+            case .int(let value):
+                sqlite3_bind_int(statement, parameterIndex, Int32(value))
+            case .double(let value):
+                sqlite3_bind_double(statement, parameterIndex, value)
+            }
+        }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let item = createClipboardItemFromRowLight(statement: statement) {
+                items.append(item)
+            }
+        }
+
         sqlite3_finalize(statement)
         return items
     }
@@ -1229,19 +1363,33 @@ class DatabaseManager {
     }
     
     func updatePinnedStatus(itemId: UUID, isPinned: Bool) {
-        let updateSQL = "UPDATE clipboard_history SET is_pinned = ?, updated_at = julianday('now') WHERE id = ?;"
+        // Keep this update compatible with older databases that may not have `updated_at`.
+        let updateSQL = "UPDATE clipboard_history SET is_pinned = ? WHERE id = ?;"
         var statement: OpaquePointer?
         
         if sqlite3_prepare_v2(db, updateSQL, -1, &statement, nil) == SQLITE_OK {
             sqlite3_bind_int(statement, 1, isPinned ? 1 : 0)
-            sqlite3_bind_text(statement, 2, itemId.uuidString, -1, nil)
-            sqlite3_step(statement)
+            bindString(statement, itemId.uuidString, at: 2)
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE {
+                let changedRows = sqlite3_changes(db)
+                if changedRows == 0 {
+                    print("DatabaseManager: Pin update touched 0 rows for \(itemId). Item not found in clipboard_history?")
+                }
+            } else {
+                let errorMessage = String(cString: sqlite3_errmsg(db))
+                print("DatabaseManager: Failed to update pinned status for \(itemId): \(errorMessage)")
+            }
+        } else {
+            let errorMessage = String(cString: sqlite3_errmsg(db))
+            print("DatabaseManager: Failed to prepare pin update statement: \(errorMessage)")
         }
         sqlite3_finalize(statement)
     }
     
     func unpinAllItems() {
-        let updateSQL = "UPDATE clipboard_history SET is_pinned = 0, updated_at = julianday('now');"
+        // Keep this update compatible with older databases that may not have `updated_at`.
+        let updateSQL = "UPDATE clipboard_history SET is_pinned = 0;"
         executeSQL(updateSQL, errorMessage: "Failed to unpin all items")
     }
     
