@@ -640,7 +640,7 @@ class DatabaseManager {
         var parameters: [QueryParameter] = []
 
         if !searchText.isEmpty {
-            whereClauses.append("(content_text LIKE ? ESCAPE '\\\\' OR content_url LIKE ? ESCAPE '\\\\')")
+            whereClauses.append("(content_text LIKE ? ESCAPE '\\' OR content_url LIKE ? ESCAPE '\\')")
             let pattern = "%\(escapeLike(searchText))%"
             parameters.append(.text(pattern))
             parameters.append(.text(pattern))
