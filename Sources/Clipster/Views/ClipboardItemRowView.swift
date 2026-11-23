@@ -113,6 +113,12 @@ struct ClipboardItemRowView: View {
         })
         .keyboardShortcut("c", modifiers: .command)
 
+        if item.formattedContent != nil {
+            Button("Copy formatted") {
+                copyFormattedItemToClipboard()
+            }
+        }
+
         if case .text(let text) = item.content {
             Button("Show full text") {
                 print("🔴 DEBUG: Show full text button tapped")
@@ -159,6 +165,19 @@ struct ClipboardItemRowView: View {
             pasteboard.writeObjects([url as NSURL])
         }
 
+        NotificationCenter.default.post(
+            name: .clipsterDidWritePasteboard,
+            object: nil,
+            userInfo: ["changeCount": pasteboard.changeCount]
+        )
+    }
+
+    private func copyFormattedItemToClipboard() {
+        guard case .text(let string) = item.content, let rtfData = item.formattedContent else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+        pasteboard.setData(rtfData, forType: .rtf)
         NotificationCenter.default.post(
             name: .clipsterDidWritePasteboard,
             object: nil,

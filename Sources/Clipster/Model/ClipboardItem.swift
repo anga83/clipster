@@ -21,6 +21,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     var physicalFileName: String? // For physical file storage
     // Indicates an inline attachment exists in the database without loading the BLOB (lightweight load)
     var hasInlineAttachment: Bool = false
+    var formattedContent: Data?
     
     // Additional attachment metadata for SQLite database
     var attachmentFilename: String?
@@ -28,7 +29,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     var attachmentUTI: String?
 
     /// Convenience initializer for creating new clipboard items.
-    init(id: UUID = UUID(), content: ClipboardContent, timestamp: Date = Date(), isPinned: Bool = false, sourceAppBundleIdentifier: String? = nil, sourceAppName: String? = nil, attachmentData: Data? = nil, isSymlinked: Bool = false, physicalFileName: String? = nil, hasInlineAttachment: Bool = false, attachmentFilename: String? = nil, attachmentFileExtension: String? = nil, attachmentUTI: String? = nil) {
+    init(id: UUID = UUID(), content: ClipboardContent, timestamp: Date = Date(), isPinned: Bool = false, sourceAppBundleIdentifier: String? = nil, sourceAppName: String? = nil, attachmentData: Data? = nil, isSymlinked: Bool = false, physicalFileName: String? = nil, hasInlineAttachment: Bool = false, attachmentFilename: String? = nil, attachmentFileExtension: String? = nil, attachmentUTI: String? = nil, formattedContent: Data? = nil) {
         self.id = id
         self.content = content
         self.timestamp = timestamp
@@ -42,11 +43,12 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.attachmentFilename = attachmentFilename
         self.attachmentFileExtension = attachmentFileExtension
         self.attachmentUTI = attachmentUTI
+        self.formattedContent = formattedContent
     }
     
     // Custom Codable implementation to handle backward compatibility
     private enum CodingKeys: String, CodingKey {
-        case id, content, timestamp, isPinned, sourceAppBundleIdentifier, sourceAppName, attachmentData, isSymlinked, physicalFileName, attachmentFilename, attachmentFileExtension, attachmentUTI
+        case id, content, timestamp, isPinned, sourceAppBundleIdentifier, sourceAppName, attachmentData, isSymlinked, physicalFileName, attachmentFilename, attachmentFileExtension, attachmentUTI, formattedContent
     }
     
     init(from decoder: Decoder) throws {
@@ -74,6 +76,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         attachmentFilename = try container.decodeIfPresent(String.self, forKey: .attachmentFilename)
         attachmentFileExtension = try container.decodeIfPresent(String.self, forKey: .attachmentFileExtension)
         attachmentUTI = try container.decodeIfPresent(String.self, forKey: .attachmentUTI)
+        formattedContent = try container.decodeIfPresent(Data.self, forKey: .formattedContent)
     }
     
     func encode(to encoder: Encoder) throws {
@@ -91,6 +94,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         try container.encodeIfPresent(attachmentFilename, forKey: .attachmentFilename)
         try container.encodeIfPresent(attachmentFileExtension, forKey: .attachmentFileExtension)
         try container.encodeIfPresent(attachmentUTI, forKey: .attachmentUTI)
+        try container.encodeIfPresent(formattedContent, forKey: .formattedContent)
     }
     
     // MARK: - Physical File Storage Helpers

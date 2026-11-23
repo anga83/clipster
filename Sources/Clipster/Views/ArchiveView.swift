@@ -145,6 +145,8 @@ struct ArchiveView: View {
                         Text("14 days").tag(14)
                         Text("30 days").tag(30)
                         Text("90 days").tag(90)
+                        Text("180 days").tag(180)
+                        Text("1 year").tag(365)
                         Text("Never").tag(-1)
                     }
                     .pickerStyle(MenuPickerStyle())

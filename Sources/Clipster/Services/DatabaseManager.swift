@@ -9,7 +9,7 @@ class DatabaseManager {
     private let debugLogger = DebugLogger.shared
     
     // Database schema version for future migrations
-    private let currentSchemaVersion = 1
+    private let currentSchemaVersion = 2
     
     init() {
         debugLogger.logFunctionEntry()
@@ -105,12 +105,14 @@ class DatabaseManager {
             attachment_file_extension TEXT,
             attachment_uti TEXT,
             physical_filename TEXT,
+            formatted_content BLOB,
             created_at REAL NOT NULL DEFAULT (julianday('now')),
             updated_at REAL NOT NULL DEFAULT (julianday('now'))
         );
         """
         
         executeSQL(createTableSQL, errorMessage: "Failed to create clipboard_history table")
+        ensureColumn("formatted_content", in: "clipboard_history", definition: "BLOB")
         
         // Create indices for better performance
         executeSQL("CREATE INDEX IF NOT EXISTS idx_timestamp ON clipboard_history(timestamp DESC);", 
@@ -138,12 +140,14 @@ class DatabaseManager {
             attachment_file_extension TEXT,
             attachment_uti TEXT,
             physical_filename TEXT,
+            formatted_content BLOB,
             attachment_deleted INTEGER NOT NULL DEFAULT 0,
             attachment_deleted_timestamp REAL
         );
         """
         
         executeSQL(createTableSQL, errorMessage: "Failed to create recently_deleted table")
+        ensureColumn("formatted_content", in: "recently_deleted", definition: "BLOB")
         
         // Create indices
         executeSQL("CREATE INDEX IF NOT EXISTS idx_deleted_timestamp ON recently_deleted(deleted_timestamp DESC);", 
@@ -170,6 +174,23 @@ class DatabaseManager {
             sqlite3_step(statement)
         }
         sqlite3_finalize(statement)
+    }
+
+    private func ensureColumn(_ column: String, in table: String, definition: String) {
+        var statement: OpaquePointer?
+        var exists = false
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(\(table));", -1, &statement, nil) == SQLITE_OK {
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let name = sqlite3_column_text(statement, 1), String(cString: name) == column {
+                    exists = true
+                    break
+                }
+            }
+        }
+        sqlite3_finalize(statement)
+        if !exists {
+            executeSQL("ALTER TABLE \(table) ADD COLUMN \(column) \(definition);", errorMessage: "Failed to add \(column) to \(table)")
+        }
     }
     
     // MARK: - Migration
@@ -279,8 +300,8 @@ class DatabaseManager {
         let insertSQL = """
         INSERT OR REPLACE INTO clipboard_history 
         (id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name, 
-         is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+         is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         
         debugLogger.logDatabaseOperation("Prepared INSERT statement", details: insertSQL)
@@ -327,6 +348,7 @@ class DatabaseManager {
             bindString(statement, item.attachmentFileExtension, at: 11)
             bindString(statement, item.attachmentUTI, at: 12)
             bindString(statement, item.physicalFileName, at: 13)
+            bindBlob(statement, item.formattedContent, at: 14)
             
             debugLogger.logDatabaseOperation("All parameters bound, executing statement")
             
@@ -365,14 +387,14 @@ class DatabaseManager {
         if includeBlobs {
             selectSQL = """
             SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-                   is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+                   is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
             FROM clipboard_history 
             ORDER BY timestamp DESC
             """.appending(limitOffsetClause(limit: limit, offset: offset)).appending(";")
         } else {
             selectSQL = """
             SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-                   is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+                   is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
             FROM clipboard_history 
             ORDER BY timestamp DESC
             """.appending(limitOffsetClause(limit: limit, offset: offset)).appending(";")
@@ -426,7 +448,7 @@ class DatabaseManager {
     // Column order for the lightweight SELECT:
     // 0:id, 1:content_type, 2:content_text, 3:content_url, 4:timestamp, 5:source_app_bundle_id,
     // 6:source_app_name, 7:is_pinned, 8:attachment_filename, 9:attachment_file_extension,
-    // 10:attachment_uti, 11:physical_filename
+        // 10:attachment_uti, 11:physical_filename, 12:formatted_content
     private func createClipboardItemFromRowLight(statement: OpaquePointer?) -> ClipboardItem? {
         guard let statement = statement else { return nil }
         guard let idCString = sqlite3_column_text(statement, 0), let uuid = UUID(uuidString: String(cString: idCString)) else {
@@ -471,6 +493,10 @@ class DatabaseManager {
             guard let c = sqlite3_column_text(statement, 11) else { return nil }
             return String(cString: c)
         }()
+        let formattedContent: Data? = {
+            guard let blob = sqlite3_column_blob(statement, 12) else { return nil }
+            return Data(bytes: blob, count: Int(sqlite3_column_bytes(statement, 12)))
+        }()
 
         return ClipboardItem(
             id: uuid,
@@ -485,7 +511,8 @@ class DatabaseManager {
             hasInlineAttachment: (physicalFileName == nil && (attachmentFilename != nil || attachmentUTI != nil)),
             attachmentFilename: attachmentFilename,
             attachmentFileExtension: attachmentFileExtension,
-            attachmentUTI: attachmentUTI
+            attachmentUTI: attachmentUTI,
+            formattedContent: formattedContent
         )
     }
 
@@ -507,7 +534,7 @@ class DatabaseManager {
     func loadPinnedItems() -> [ClipboardItem] {
         let sql = """
         SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
         FROM clipboard_history
         WHERE is_pinned = 1
         ORDER BY timestamp DESC;
@@ -528,7 +555,7 @@ class DatabaseManager {
     func loadRecentUnpinnedItems(limit: Int) -> [ClipboardItem] {
         let sql = """
         SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
         FROM clipboard_history
         WHERE is_pinned = 0
         ORDER BY timestamp DESC
@@ -551,7 +578,7 @@ class DatabaseManager {
         // Use case-insensitive match on text/url and optional source app filter
         var sql = """
         SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
         FROM clipboard_history
         WHERE (content_text LIKE ? ESCAPE '\\' OR content_url LIKE ? ESCAPE '\\')
         """
@@ -632,7 +659,7 @@ class DatabaseManager {
 
         var sql = """
         SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+               is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
         FROM clipboard_history
         """
 
@@ -772,8 +799,8 @@ class DatabaseManager {
         let insertSQL = """
         INSERT INTO recently_deleted 
         (id, content_type, content_text, content_url, original_timestamp, source_app_bundle_id, source_app_name,
-         was_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+         was_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         
         var statement: OpaquePointer?
@@ -812,6 +839,7 @@ class DatabaseManager {
             bindString(statement, item.attachmentFileExtension, at: 11)
             bindString(statement, item.attachmentUTI, at: 12)
             bindString(statement, item.physicalFileName, at: 13)
+            bindBlob(statement, item.formattedContent, at: 14)
             
             debugLogger.logDatabaseOperation("Executing INSERT for recently_deleted")
             let result = sqlite3_step(statement)
@@ -837,7 +865,7 @@ class DatabaseManager {
         let selectSQL = """
         SELECT id, content_type, content_text, content_url, original_timestamp, source_app_bundle_id, source_app_name,
                was_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, 
-               physical_filename, attachment_deleted, deleted_timestamp
+               physical_filename, attachment_deleted, deleted_timestamp, formatted_content
         FROM recently_deleted 
         ORDER BY deleted_timestamp DESC;
         """
@@ -939,7 +967,7 @@ class DatabaseManager {
         let selectSQL = """
         SELECT id, content_type, content_text, content_url, original_timestamp, source_app_bundle_id, source_app_name,
                was_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, 
-               physical_filename, attachment_deleted, deleted_timestamp
+               physical_filename, attachment_deleted, deleted_timestamp, formatted_content
         FROM recently_deleted 
         WHERE id = ? LIMIT 1;
         """
@@ -1247,7 +1275,10 @@ class DatabaseManager {
             guard let cString = sqlite3_column_text(statement, 12) else { return nil }
             return String(cString: cString)
         }()
-        
+        let formattedContent: Data? = {
+            guard let blob = sqlite3_column_blob(statement, 13) else { return nil }
+            return Data(bytes: blob, count: Int(sqlite3_column_bytes(statement, 13)))
+        }()
         debugLogger.log("Creating ClipboardItem with all parsed data", level: .debug)
         debugLogger.log("UUID: \(uuid), bundleId: \(bundleId ?? "nil"), appName: \(appName ?? "nil")", level: .debug)
         
@@ -1263,7 +1294,8 @@ class DatabaseManager {
             physicalFileName: physicalFileName,
             attachmentFilename: attachmentFilename,
             attachmentFileExtension: attachmentFileExtension,
-            attachmentUTI: attachmentUTI
+            attachmentUTI: attachmentUTI,
+            formattedContent: formattedContent
         )
         
         debugLogger.log("Successfully created ClipboardItem with ID: \(item.id)", level: .debug)
@@ -1344,6 +1376,10 @@ class DatabaseManager {
             String(cString: sqlite3_column_text(statement, 11)) : nil
         let physicalFileName = attachmentDeleted ? nil : (sqlite3_column_text(statement, 12) != nil ? 
             String(cString: sqlite3_column_text(statement, 12)) : nil)
+        let formattedContent: Data? = {
+            guard let blob = sqlite3_column_blob(statement, 15) else { return nil }
+            return Data(bytes: blob, count: Int(sqlite3_column_bytes(statement, 15)))
+        }()
         
         debugLogger.logDatabaseOperation("Attachment metadata", details: "Filename: \(attachmentFilename ?? "nil"), Extension: \(attachmentFileExtension ?? "nil"), UTI: \(attachmentUTI ?? "nil"), Physical: \(physicalFileName ?? "nil")")
         
@@ -1359,7 +1395,8 @@ class DatabaseManager {
             physicalFileName: physicalFileName,
             attachmentFilename: attachmentFilename,
             attachmentFileExtension: attachmentFileExtension,
-            attachmentUTI: attachmentUTI
+            attachmentUTI: attachmentUTI,
+            formattedContent: formattedContent
         )
         
         debugLogger.logDatabaseOperation("ClipboardItem created successfully", details: "ID: \(item.id)")
@@ -1403,7 +1440,7 @@ class DatabaseManager {
         // Move non-pinned items to recently_deleted
         let selectSQL = """
         SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
-               is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename
+               is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
         FROM clipboard_history 
         WHERE is_pinned = 0;
         """

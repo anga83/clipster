@@ -104,11 +104,12 @@ class ClipboardMonitor {
 
         // Prioritize file URLs, then fall back to strings.
         // Read pasteboard snapshot (URL or string) on main thread only, processing off main
-        let (maybeFileURL, maybeString): (URL?, String?) = DispatchQueue.main.sync {
+        let (maybeFileURL, maybeString, maybeFormattedContent): (URL?, String?, Data?) = DispatchQueue.main.sync {
             let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL]
             let url = urls?.first(where: { $0.isFileURL })
             let str = pasteboard.string(forType: .string)
-            return (url, str)
+            let formatted = pasteboard.data(forType: .rtf) ?? pasteboard.data(forType: NSPasteboard.PasteboardType("public.rtf"))
+            return (url, str, formatted)
         }
 
         if let fileURL = maybeFileURL {
@@ -165,7 +166,7 @@ class ClipboardMonitor {
             
             // Check if text meets minimum length requirement
             if copiedString.count >= settingsStore.minTextLength {
-                newItem = ClipboardItem(content: .text(copiedString), sourceAppBundleIdentifier: sourceID, sourceAppName: sourceName)
+                newItem = ClipboardItem(content: .text(copiedString), sourceAppBundleIdentifier: sourceID, sourceAppName: sourceName, formattedContent: maybeFormattedContent)
             } else {
                 print("ClipboardMonitor: Text too short (\(copiedString.count) chars, minimum: \(settingsStore.minTextLength)), skipping")
             }
