@@ -1,264 +1,96 @@
-# Clipster - Projektdokumentation
+# Clipster: Projektdokumentation
 
-Stand: 22.02.2026
+Stand: 24. November 2026
 
-## 1. Projektüberblick
-Clipster ist ein Clipboard-Manager für macOS (Swift/SwiftUI), der primär als Menüleisten-App läuft und optional ein Hauptfenster anbietet.
+## Projekt und aktueller Stand
 
-Ziele:
-- Zwischenablage-Historie persistent speichern
-- Text und Datei-Referenzen verwalten
-- Inhalte schnell suchen, filtern, pinnen und erneut kopieren
-- Historie inklusive Metadaten/Anhängen exportieren
+Clipster ist ein nativer macOS-Zwischenablage-Manager mit SwiftUI und AppKit. Die App läuft mit Menüleisten-Popover und optionalem Hauptfenster. App-Version und Build-Nummer werden in `Sources/Clipster/Resources/Info.plist` gepflegt (derzeit `2.5.4`, Build `38`). Mindestversion ist macOS 15.
 
-## 2. Aktueller Versionsstand
-- App-Version: `2.5.1`
-- Build-Nummer: `35`
-- Mindest-macOS: `15.0`
-- Copyright: `2026`
-- Quelle:
-  - `Sources/Clipster/Resources/Info.plist`
+Das Repository verwendet Swift Package Manager. Es gibt ein ausführbares Target `Clipster`, aber derzeit kein separates Test-Target. SQLite wird über `sqlite3` eingebunden. AppKit- und SwiftUI-Funktionen werden im Paket direkt verwendet.
 
-## 3. Hauptfunktionen
+## Nutzerfunktionen und Verhalten
 
-### 3.1 Clipboard-Historie
-- Polling-basierte Überwachung der systemweiten Zwischenablage
-- Speicherung in SQLite (`clipster.db`)
-- Unterstützte Inhalte:
-  - Text
-  - Datei-URLs
-- Duplikat-Schutz für direkt aufeinanderfolgende identische Inhalte
+- `ClipboardMonitor` fragt das System-Pasteboard regelmäßig ab und speichert Text sowie Datei-URLs lokal. Clipster ignoriert standardmäßig eigene Pasteboard-Schreibvorgänge und kann Quell-Apps über eine Blacklist ausschließen.
+- Die Historie liegt in `~/Library/Application Support/Clipster/clipster.db`. Einstellungen werden in `settings.plist`, physisch ausgelagerte Anhänge im Unterordner `attachments/` gespeichert.
+- Normales Anklicken eines Eintrags kopiert weiterhin den unformatierten Text. Wenn RTF-Daten vorliegen, ergänzt das Kontextmenü `Copy formatted`; dabei werden Klartext und RTF aufs Pasteboard geschrieben.
+- Text- und Datei-Einträge haben unterschiedliche Aktionen. Dateien können per Quick Look angesehen, geöffnet oder in andere Apps gezogen werden. Lange Texte können separat angezeigt werden.
+- Einträge lassen sich suchen, nach Quell-App, Pin-Status, Datum und Textlänge filtern, pinnen und löschen. Die Initialansicht lädt ein begrenztes aktuelles Set plus Pins; Suche und angewendete Filter fragen die ganze Datenbank ab. Filter im Hauptfenster werden zunächst als Entwurf gewählt und erst mit `Apply` abgefragt.
+- Gelöschte Einträge werden zunächst ins Archiv verschoben und können wiederhergestellt oder endgültig gelöscht werden. Archiv-Retention für Text und Anhänge ist getrennt konfigurierbar.
+- Der optionale globale Shortcut `⌥⌘V` erfasst das aktuelle Pasteboard auch dann, wenn die Quell-App auf der Blacklist steht.
+- Vollbackup als ZIP enthält einen SQLite-Snapshot, JSON-Exporte aktiver und archivierter Einträge, Einstellungen und vorhandene Anhänge. Der Importaufruf im aktuellen Store ist noch ein Placeholder und darf nicht als funktionierender Wiederherstellungsworkflow dokumentiert werden.
 
-### 3.2 Menüleisten-App und Hauptfenster
-- Menüleisten-Popover mit Suche, Verlauf und Footer-Menü
-- Optionales Hauptfenster mit erweitertem Workflow
-- Aktivierungs-/Fokuslogik regressionssensitiv:
-  - Beim Öffnen des Hauptfensters wird die App als `.regular` aktiviert.
-  - Das Hauptfenster muss als aktive App im Vordergrund erscheinen.
-  - Menüleisten-App-Modus (`.accessory`) nur im expliziten Menüleisten-Only-Fall.
+## Persistenz und Datenbank-Kompatibilität
 
-### 3.3 Suche und Filter (aktuelle Architektur)
-Zielkonflikt Performance vs. Vollständigkeit wurde explizit aufgelöst:
+`DatabaseManager` erstellt Tabellen bei Bedarf und ergänzt Schema-Erweiterungen über `ensureColumn(...)`. So können neue optionale Spalten auch in bereits vorhandenen Datenbanken angelegt werden. Unter anderem ist `formatted_content BLOB` in `clipboard_history` und `recently_deleted` nullable: ältere Datenbanken behalten ihre Einträge und funktionieren ohne Rich-Text-Funktion, bis die Migration beim Start die Spalte ergänzt.
 
-- Startverhalten:
-  - Initial werden **nicht alle** Items geladen.
-  - Geladen werden: alle gepinnten + eine konfigurierbare Anzahl aktueller ungepinnter Items.
-- Suche/Filter-Verhalten:
-  - Sobald Suche oder aktive Filter greifen, wird die **gesamte DB** abgefragt.
-  - Damit werden auch ältere Einträge gefunden, die nicht im Initial-Subset liegen.
+DB-Verbindungen verwenden `SQLITE_OPEN_FULLMUTEX`, WAL und einen Busy-Timeout von 3000 ms. Änderungen an Schema und Queries müssen mit bestehenden Benutzer-Datenbanken kompatibel bleiben; destructive Migrationen sind zu vermeiden.
 
-Aktuelle Filterkriterien:
-- Mehrfachauswahl bei Apps (`App Filter`)
-- `Pinned only`
-- Datumsbereich (`Oldest date` bis `Newest date`)
-- Textlänge:
-  - Minimum
-  - Maximum oder `Unlimited maximum` (nur Untergrenze aktiv)
+## Development
 
-### 3.4 Filter-UX (Apply-Workflow)
-Der Filterdialog im Hauptfenster wurde auf einen performanten Apply-Workflow umgestellt:
+### Voraussetzungen und Build
 
-1. Klick auf Filter-Button
-2. Es werden nur Metadaten geladen:
-   - eindeutige App-Liste
-   - ältestes/neuestes Datum
-3. Nutzer wählt Filter (Draft-Zustand, noch ohne Query)
-4. Klick auf `Apply`
-5. Erst dann DB-Query mit den exakten Kriterien
+- macOS 15 oder neuer
+- Vollständiges Xcode unter `/Applications/Xcode.app` für den App-Icon-Build (`actool`)
+- SwiftPM aus der Xcode-Toolchain
 
-Weitere Details:
-- Filterdialog zeigt Ladezustand für Metadaten
-- Keine Vollabfrage beim bloßen Öffnen des Dialogs
-- `Export Filtered JSON` exportiert die aktuell angewendete Query-Menge
+Das aktive `xcode-select` darf auf die Command Line Tools zeigen. Für Builds, die Xcode-Werkzeuge benötigen, `DEVELOPER_DIR` setzen:
 
-### 3.5 Item-Aktionen
-Pro Item (Kontextmenü):
-- `Copy`
-- `Pin/Unpin`
-- `Delete`
-- Datei-Items zusätzlich:
-  - `Quick Look`
-  - `Open`
-- Text-Items zusätzlich:
-  - `Show full text`
+```bash
+export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+xcodebuild -version
+swift build
+```
 
-`Show full text` öffnet den vollständigen Text in einem großen, scrollbaren QuickLook-Fenster (technisch über temporäre UTF-8-`.txt`-Datei).
+Das ausführbare Debug-Binary liegt unter `.build/debug/Clipster`; den Release-Build erzeugt `swift build -c release` unter `.build/release/Clipster`. SwiftPM erstellt selbst kein vollständiges `.app`-Bundle.
 
-### 3.6 Archiv (Recently Deleted)
-- Soft-Delete nach `recently_deleted`
-- Wiederherstellen einzelner Einträge
-- Permanentes Löschen
-- Retention/Cleanup für Text und Attachments
+### App-Bundle lokal erstellen
 
-### 3.7 Export/Backup
-Vollbackup als ZIP enthält:
-- `clipster.db` (SQLite-Snapshot)
-- `history.json` (aktive Historie aus `clipboard_history`)
-- `archived.json` (Archiv aus `recently_deleted`)
-- `settings.plist` (falls vorhanden)
-- `attachments/` (falls vorhanden)
-- `backup-manifest.json`
+Die aktuelle, vollständige manuelle Anleitung steht in [`Scripts/BUILD_COMMANDS.txt`](Scripts/BUILD_COMMANDS.txt). Wesentliche Details:
 
-Wichtige Semantik:
-- `history.json` bleibt aktive Historie.
-- `archived.json` enthält Archivdaten separat.
+1. Binary aus `.build/release/Clipster` nach `Clipster.app/Contents/MacOS/Clipster` kopieren und ausführbar machen.
+2. `Sources/Clipster/Resources/Info.plist` nach `Contents/Info.plist` kopieren.
+3. Den Asset-Katalog `Sources/Clipster/Resources/AppIcon.xcassets` mit `xcrun --sdk macosx actool` nach `Contents/Resources` kompilieren. Das erzeugt `Assets.car` und `AppIcon.icns`; die einzelnen PNGs gehören nicht roh ins Bundle.
+4. Bundle-Info prüfen, zum Beispiel mit `plutil -lint`.
 
-Wichtige UX:
-- Wird Export aus dem Popover gestartet, schließt sich das Popover zuerst, damit das Fortschrittsfenster sichtbar bleibt.
+Version und Build-Nummer für den Bundle-Metadatenstand in `Info.plist` pflegen. `Release/` und `.build/` sind ignorierte Build-Artefakte.
 
-### 3.8 Menüs (aktueller Endstand)
-Menüleisten-Popover (Footer-Gear-Menü):
-- `Open Main Window`
-- `Import History...`
-- `Export History...`
-- `Quit Clipster`
+### GitHub Actions Release
 
-Bewusst entfernt:
-- `Clear History...`
-- `Open Settings`
+`.github/workflows/release.yml` ist der maßgebliche automatisierte Distributionspfad:
 
-Hinweis: `Clear History` existiert weiterhin als Aktion im Hauptfenster-Toolbar-Workflow.
+- Läuft bei jedem Push auf `main` und manuell via `workflow_dispatch` auf einem GitHub-hosted `macos-15` Runner.
+- Verwendet `actions/checkout@v5` (Node 24; v5 benötigt Runner 2.327.1 oder neuer) und lädt alle Tags sowie die vollständige Git-History.
+- Liest `CFBundleShortVersionString` aus `Info.plist`, baut Binary und App-Bundle samt Icon, erstellt ein komprimiertes DMG und veröffentlicht es als GitHub Release `v<Version>`.
+- Release Notes listen Commit-Betreffzeilen seit dem vorherigen `v*`-Tag. Falls noch kein Release-Tag existiert, wird beim Push dessen `before`-Commit als Startpunkt genutzt.
+- Ein Versions-Tag wird nicht überschrieben: Gibt es `v<Version>` bereits, überspringt der Workflow Build und Veröffentlichung. Vor einem neuen Release deshalb Versionsnummer erhöhen und einen noch nicht verwendeten Tag sicherstellen.
+- Workflow-Permissions sind auf `contents: write` begrenzt, damit `gh release create` Release und Tag veröffentlichen kann.
+- Das DMG ist derzeit unsigniert und wird nicht notarisiert. Distribution ohne Apple Developer ID-Secrets ist dadurch möglich; Gatekeeper kann beim ersten Start eine manuelle Bestätigung erfordern.
 
-### 3.9 Settings-UI
-- Obere, inhaltlich unnötige graue Leiste entfernt
-- Mehr Platz für eigentliche Einstellungen
-- Fenster-Controls (inkl. Schließen) bleiben erhalten
+Xcode-Builds müssen auf einem Runner funktionieren, auf dem vollständige Xcode- und Command-Line-Tools verfügbar sind. Bei lokalen SwiftPM-/Asset-Katalog-Problemen sicherstellen, dass `DEVELOPER_DIR` auf Xcode zeigt. `actool` setzt die vollständige Xcode-Installation voraus.
 
-## 4. Technischer Aufbau
+## Architektur- und Änderungsleitlinien
 
-### 4.1 Technologien
-- Swift Package Manager
-- SwiftUI + AppKit
-- SQLite3 via C-Bindings
+- UI und Szenen: `ClipsterApp.swift`, `ContentView.swift` und `Views/`.
+- App-Einstellungen: `Data/SettingsStore.swift`; DB und SQL: `Services/DatabaseManager.swift`.
+- Pasteboard-Erfassung: `Services/ClipboardMonitor.swift`; fachliche Historienoperationen: `Data/ClipboardHistoryStore.swift`.
+- Ein Clipboard-Eintrag und optionale Rich-Text-/Attachment-Daten: `Model/ClipboardItem.swift`.
+- Backup-Erstellung: `Services/BackupExportService.swift`.
+- Menüleisten-App-Icon und Dock-/App-Icon haben unterschiedliche Quellen: Menüleisten-Icon wird im SwiftUI-Label als SF Symbol `paperclip` gerendert; das Dock-/App-Icon kommt aus dem AppIcon-Asset-Katalog.
+- Interne Pasteboard-Schreibvorgänge müssen vom Monitor ignoriert werden, damit das Kopieren eines Eintrags kein Duplikat in der Historie erzeugt.
+- Initiales Laden soll begrenzt bleiben. Filterabfragen müssen auf der Datenbank laufen, damit ältere Einträge gefunden werden, ohne beim Öffnen des Filterdialogs die ganze Historie in den Speicher zu laden.
+- Pins müssen in SQLite gespeichert werden und dürfen nicht allein aus dem UI-State abgeleitet werden.
 
-### 4.2 Relevante Dateien
-- `Sources/Clipster/ClipsterApp.swift`
-  - App-Entry, Szenen, Aktivierungslogik
-- `Sources/Clipster/ContentView.swift`
-  - Haupt-UI, Popover-UI, Filterdialog, Query-Trigger, Export Filtered JSON
-- `Sources/Clipster/Views/ClipboardItemRowView.swift`
-  - Item-Kontextmenü, inkl. `Show full text`
-- `Sources/Clipster/Data/ClipboardHistoryStore.swift`
-  - Store-Logik, Filter-Metadaten, Filter-Queries, Pin-Handling
-- `Sources/Clipster/Services/DatabaseManager.swift`
-  - SQLite-Schema/CRUD, Query-Bau, DB-Öffnung/Thread-Safety
-- `Sources/Clipster/Services/BackupExportService.swift`
-  - ZIP-Backup-Aufbereitung
-- `Sources/Clipster/Services/ExportProgressWindowController.swift`
-  - Fortschrittsfenster
+## Relevante Dateien
 
-### 4.3 Datenablage
-Unter `~/Library/Application Support/Clipster/`:
-- `clipster.db`
-- `settings.plist`
-- `attachments/`
+- `Package.swift` – SwiftPM-Produkt, macOS-Zielplattform und SQLite-Link.
+- `Sources/Clipster/Resources/Info.plist` – Bundle-Metadaten, App-Version, Build und Mindest-macOS.
+- `Sources/Clipster/Resources/AppIcon.xcassets/` – App- und Dock-Icon-Quelldateien.
+- `Scripts/BUILD_COMMANDS.txt` – lokale Bundle-Erstellung und Prüfung.
+- `.github/workflows/release.yml` – CI-Build, DMG und Release-Erstellung.
+- `README.md` – Endnutzer-Dokumentation für GitHub.
 
-## 5. Kritische Erkenntnisse und behobene Probleme aus diesem Chat
+## Bekannte Einschränkungen
 
-### 5.1 Pin-Persistenz
-Problem:
-- Gepinnte Einträge waren in der UI sichtbar, wurden aber teils nicht persistent in DB gespeichert.
-- Folge: Nach App-Neustart erschienen alle als ungepinnt.
-
-Fixes:
-- Robustes Pin-Update in `DatabaseManager.updatePinnedStatus(...)`
-- Sichere String-Bindings
-- Logging, wenn ein Pin-Update 0 Zeilen betrifft (`sqlite3_changes == 0`)
-- Pin/Unpin funktioniert auch für Items außerhalb des initial geladenen Subsets
-
-Erkenntnis:
-- Bereits verlorene Pins sind ohne altes Backup im Regelfall nicht zuverlässig rekonstruierbar.
-- Teilweise historische Hinweise können über `recently_deleted.was_pinned` existieren, aber nicht vollständig für aktive Historie.
-
-### 5.2 Filter-Crash beim Anwenden (EXC_BAD_ACCESS in sqlite3Prepare)
-Beobachtung:
-- Crash auf Background-Queue beim `sqlite3_prepare_v2` während Filter-Query.
-
-Fix:
-- DB-Öffnung auf `sqlite3_open_v2(..., SQLITE_OPEN_FULLMUTEX)` umgestellt
-- `sqlite3_busy_timeout(..., 3000)` gesetzt
-- Zusätzliches Fehlerlogging bei `prepare`-Fehlern
-
-### 5.3 Filter-Performance
-Problem:
-- Vollhistorie im RAM für Filter führte zu Hängern beim Öffnen/Anpassen.
-
-Fix:
-- Metadatenladung getrennt von Ergebnissuche
-- Draft-Filter + explizites `Apply`
-- Query nur bei tatsächlicher Anwendung
-
-### 5.4 Export-Zuverlässigkeit
-- Export enthält jetzt konsistent DB + JSON-Dumps (`history.json`, `archived.json`)
-- Export aus Popover schließt Popover vorher
-- Snapshot-/JSON-Pfade wurden robuster gemacht
-
-## 6. Build- und Release-Prozess (aktuell)
-
-### 6.1 Aktive Vorgehensweise
-Die Release-Erstellung erfolgt derzeit **ohne alte Skripte**, per direkten Shell-Befehlen.
-
-Referenz:
-- `Scripts/BUILD_COMMANDS.txt`
-
-### 6.2 Skriptstruktur
-- Alte Skripte wurden verschoben nach:
-  - `Scripts/old/`
-- Dort liegen u. a.:
-  - `build_release.sh`
-  - `release.sh`
-  - `dev.sh`
-  - `generate_app_icon.sh`
-
-### 6.3 Aktuelle Release-Artefakte
-- `Release/Clipster-2.5/Clipster.app`
-- `Release/Clipster-2.5.1/Clipster.app`
-- ältere Release-Ordner zusätzlich vorhanden
-
-## 7. Regression-sensitive Verhaltensdetails
-
-1. Interner Re-Copy darf kein neues History-Item erzeugen
-- Interne Clipboard-Änderungen werden im Monitor erkannt und ignoriert.
-
-2. Initiale Last gering halten
-- Nicht volle DB laden beim Start.
-- Trotzdem Suche/Filter über gesamte DB gewährleisten.
-
-3. Pinned-Status ist persistenter Wahrheitswert
-- UI darf nicht alleinige Quelle sein.
-- DB-Update muss zuverlässig und prüfbar erfolgen.
-
-4. Filterdialog darf nicht blockieren
-- Nur Metadaten laden beim Öffnen.
-- Ergebnisse erst bei `Apply`.
-
-5. Menubar-Export
-- Popover vorher schließen, damit Fortschrittsfenster sichtbar ist.
-
-## 8. Bekannte technische Schulden
-
-1. Import-Flow
-- Import in `ClipboardHistoryStore` ist weiterhin Placeholder.
-
-2. Deprecation-Warnings
-- Mehrere `onChange(of:perform:)`-Verwendungen sind deprecated.
-
-3. Concurrency-Warnings
-- `Sendable`-Warnings rund um `DatabaseManager` in async-Kontexten bestehen weiterhin.
-
-## 9. QA-Checkliste vor Release
-
-- Pin/Unpin setzen, App neu starten, Persistenz prüfen
-- `Pinned only`-Filter mit vorhandenen Pins prüfen
-- Filterdialog öffnen: keine UI-Hänger
-- Filter anwenden: kein Crash
-- Textlängenfilter mit `Unlimited maximum` prüfen
-- `Show full text` bei langen Texten prüfen
-- Export aus Popover starten: Fortschrittsfenster sichtbar
-- ZIP-Inhalt validieren (`clipster.db`, `history.json`, `archived.json`, Manifest)
-
-## 10. Handover-Kurzfassung
-Für Folgearbeit sind diese Punkte zentral:
-- Architekturentscheidung: Initial-Subset + Full-DB bei Suche/Filter ist bewusst.
-- Pinned-Persistenz und DB-Thread-Safety waren reale Produktionsprobleme und wurden explizit adressiert.
-- Release-Prozess ist derzeit bewusst einfach (direkte Commands), alte Skripte sind archiviert unter `Scripts/old`.
+- `ClipboardHistoryStore.importHistory(...)` ist derzeit ein Placeholder; Backup-Export funktioniert, Import noch nicht.
+- Das Release-DMG wird nicht signiert oder notarisiert.
+- Im Quellcode bestehen SwiftUI-Deprecation- und Concurrency-Warnungen; vor Änderungen an den betroffenen Pfaden auf mögliche Regressionen achten.
