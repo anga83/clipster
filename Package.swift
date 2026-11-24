@@ -18,11 +18,7 @@ let package = Package(
         .executableTarget(
             name: "Clipster",
             dependencies: [],
-            exclude: ["Resources/Info.plist"],
-            resources: [
-                // Only process the asset catalog
-                .process("Resources/AppIcon.xcassets")
-            ],
+            exclude: ["Resources/Info.plist", "Resources/AppIcon.xcassets", "Resources/AppIcon.icns"],
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
                 .unsafeFlags([

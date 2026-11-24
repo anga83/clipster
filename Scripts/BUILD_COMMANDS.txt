@@ -1,32 +1,64 @@
-Clipster Build-/Release-Befehle (ohne Skripte)
+Clipster Release Build und App Bundle
+====================================
 
-Ich verwende aktuell direkte Terminal-Befehle statt der alten Shell-Skripte.
+Voraussetzungen
+---------------
 
-1) Version/Build in Info.plist setzen
-   (Werte in Sources/Clipster/Resources/Info.plist aktualisieren)
+- Xcode ist unter /Applications/Xcode.app installiert.
+- Das Paket benötigt macOS 15 oder neuer.
 
-   Beispiel 2.5.1 (Build 35):
-   - CFBundleShortVersionString = 2.5.1
-   - CFBundleVersion = 35
+Das aktive `xcode-select` kann weiterhin auf die Command Line Tools zeigen. Für
+den Build deshalb `DEVELOPER_DIR` setzen. So verwenden sowohl SwiftPM als auch
+`actool` die Xcode-Installation, ohne die systemweite Toolchain umzustellen.
 
-2) Release-Binary bauen
+1. Release-Binary bauen
+-----------------------
 
-   swift build -c release
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+    xcodebuild -version
+    swift build -c release
 
-3) App-Bundle im Release-Ordner erstellen/ersetzen
+Das Binary wird unter `.build/release/Clipster` erzeugt. SwiftPM erstellt hier
+nicht selbst das vollständige `.app`-Bundle.
 
-   set -euo pipefail
-   RELEASE_DIR="Release/Clipster-<VERSION>"
-   APP_DIR="$RELEASE_DIR/Clipster.app"
-   rm -rf "$APP_DIR"
-   mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-   cp ".build/release/Clipster" "$APP_DIR/Contents/MacOS/"
-   chmod +x "$APP_DIR/Contents/MacOS/Clipster"
-   cp "Sources/Clipster/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
-   cp -R "Sources/Clipster/Resources/AppIcon.xcassets" "$APP_DIR/Contents/Resources/"
-   cp "Sources/Clipster/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+2. App Bundle erstellen
+-----------------------
 
-4) Verifikation
+Version und Build-Nummer werden aus `Sources/Clipster/Resources/Info.plist`
+gelesen. Das Zielverzeichnis passt sich dadurch automatisch an die Version an:
 
-   plutil -p "Release/Clipster-<VERSION>/Clipster.app/Contents/Info.plist" | rg "CFBundleShortVersionString|CFBundleVersion|LSMinimumSystemVersion" -n
-   ls -la "Release/Clipster-<VERSION>/Clipster.app/Contents/MacOS/Clipster"
+    VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Clipster/Resources/Info.plist)"
+    RELEASE_DIR="Release/Clipster-$VERSION"
+    APP_DIR="$RELEASE_DIR/Clipster.app"
+
+    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+    cp ".build/release/Clipster" "$APP_DIR/Contents/MacOS/Clipster"
+    chmod +x "$APP_DIR/Contents/MacOS/Clipster"
+    cp "Sources/Clipster/Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+
+    xcrun --sdk macosx actool \
+      --compile "$APP_DIR/Contents/Resources" \
+      --platform macosx \
+      --minimum-deployment-target 15.0 \
+      --app-icon AppIcon \
+      --output-partial-info-plist ".build/Clipster-assetcatalog-info.plist" \
+      "Sources/Clipster/Resources/AppIcon.xcassets"
+
+`actool` erzeugt `Assets.car` und `AppIcon.icns` aus dem AppIcon-Asset-Katalog.
+Der Katalog liegt unter `Sources/Clipster/Resources/AppIcon.xcassets/AppIcon.appiconset`.
+Die einzelnen PNGs und die `.xcassets`-Quelldatei nicht roh in das App Bundle
+kopieren.
+
+Für einen erneuten Bundle-Bau mit derselben Versionsnummer zuerst das vorhandene
+`$APP_DIR` entfernen, damit keine veralteten Ressourcen zurückbleiben.
+
+3. Bundle prüfen
+----------------
+
+    plutil -lint "$APP_DIR/Contents/Info.plist"
+    plutil -p "$APP_DIR/Contents/Info.plist" | rg "CFBundleShortVersionString|CFBundleVersion|CFBundleIconFile|CFBundleIconName|LSMinimumSystemVersion"
+    file "$APP_DIR/Contents/MacOS/Clipster" "$APP_DIR/Contents/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/Assets.car"
+
+`Release/` ist in `.gitignore` ausgeschlossen und wird nicht ins Repository
+eingecheckt. Die Debug-Logs verwenden `#fileID`, damit das Binary keine lokalen
+absoluten Quellpfade einbettet.

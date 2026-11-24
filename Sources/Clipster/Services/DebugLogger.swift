@@ -35,7 +35,7 @@ class DebugLogger {
     
     private init() {}
     
-    func log(_ message: String, level: LogLevel = .debug, file: String = #file, function: String = #function, line: Int = #line) {
+    func log(_ message: String, level: LogLevel = .debug, file: String = #fileID, function: String = #function, line: Int = #line) {
         guard level >= minLevel else { return }
         let fileName = URL(fileURLWithPath: file).lastPathComponent
         let timestamp = DateFormatter.debugFormatter.string(from: Date())
@@ -57,27 +57,27 @@ class DebugLogger {
         }
     }
     
-    func logFunctionEntry(file: String = #file, function: String = #function, line: Int = #line) {
+    func logFunctionEntry(file: String = #fileID, function: String = #function, line: Int = #line) {
         log("🔹 ENTER", level: .debug, file: file, function: function, line: line)
     }
     
-    func logFunctionExit(file: String = #file, function: String = #function, line: Int = #line) {
+    func logFunctionExit(file: String = #fileID, function: String = #function, line: Int = #line) {
         log("🔸 EXIT", level: .debug, file: file, function: function, line: line)
     }
     
-    func logError(_ error: Error, context: String = "", file: String = #file, function: String = #function, line: Int = #line) {
+    func logError(_ error: Error, context: String = "", file: String = #fileID, function: String = #function, line: Int = #line) {
         log("💥 ERROR in \(context): \(error.localizedDescription)", level: .error, file: file, function: function, line: line)
     }
     
-    func logCrashPrevention(_ message: String, file: String = #file, function: String = #function, line: Int = #line) {
+    func logCrashPrevention(_ message: String, file: String = #fileID, function: String = #function, line: Int = #line) {
         log("🛡️ CRASH PREVENTION: \(message)", level: .critical, file: file, function: function, line: line)
     }
     
-    func logArchiveOperation(_ operation: String, details: String = "", file: String = #file, function: String = #function, line: Int = #line) {
+    func logArchiveOperation(_ operation: String, details: String = "", file: String = #fileID, function: String = #function, line: Int = #line) {
         log("📦 ARCHIVE: \(operation) - \(details)", level: .info, file: file, function: function, line: line)
     }
     
-    func logDatabaseOperation(_ operation: String, details: String = "", file: String = #file, function: String = #function, line: Int = #line) {
+    func logDatabaseOperation(_ operation: String, details: String = "", file: String = #fileID, function: String = #function, line: Int = #line) {
         log("🗄️ DATABASE: \(operation) - \(details)", level: .info, file: file, function: function, line: line)
     }
 }
