@@ -2,11 +2,28 @@ import Foundation
 import SQLite3
 
 /// Manages SQLite database operations for clipboard history storage
-class DatabaseManager {
+class DatabaseManager: @unchecked Sendable {
     private var db: OpaquePointer?
     private let dbURL: URL
     private let supportURL: URL
     private let debugLogger = DebugLogger.shared
+
+    enum BackupTransferError: LocalizedError {
+        case databaseUnavailable
+        case sqlite(String)
+        case invalidSnapshot(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .databaseUnavailable:
+                return "The Clipster database is not available."
+            case .sqlite(let message):
+                return "SQLite backup import failed: \(message)"
+            case .invalidSnapshot(let message):
+                return "The backup database is invalid: \(message)"
+            }
+        }
+    }
     
     // Database schema version for future migrations
     private let currentSchemaVersion = 2
@@ -79,6 +96,168 @@ class DatabaseManager {
             print("DatabaseManager: Error closing database")
         }
         db = nil
+    }
+
+    func hasStoredItems() -> Bool {
+        guard let db else { return false }
+        return rowCount(in: "clipboard_history", database: db) > 0
+            || rowCount(in: "recently_deleted", database: db) > 0
+    }
+
+    func createSnapshot(at destinationURL: URL) throws {
+        guard let db else { throw BackupTransferError.databaseUnavailable }
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? FileManager.default.removeItem(at: destinationURL)
+
+        var destination: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            destinationURL.path,
+            &destination,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let destination else {
+            let message = sqliteErrorMessage(from: destination)
+            sqlite3_close(destination)
+            throw BackupTransferError.sqlite(message)
+        }
+        defer { sqlite3_close(destination) }
+        try copyDatabase(from: db, to: destination)
+    }
+
+    func replaceContents(from snapshotURL: URL) throws {
+        guard let db else { throw BackupTransferError.databaseUnavailable }
+        var source: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            snapshotURL.path,
+            &source,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let source else {
+            let message = sqliteErrorMessage(from: source)
+            sqlite3_close(source)
+            throw BackupTransferError.invalidSnapshot(message)
+        }
+        defer { sqlite3_close(source) }
+
+        try copyDatabase(from: source, to: db)
+        createTables()
+    }
+
+    func mergeContents(from snapshotURL: URL) throws {
+        guard let db else { throw BackupTransferError.databaseUnavailable }
+        var attachStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "ATTACH DATABASE ? AS imported_backup;", -1, &attachStatement, nil) == SQLITE_OK else {
+            throw BackupTransferError.sqlite(sqliteErrorMessage(from: db))
+        }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(attachStatement, 1, snapshotURL.path, -1, transient)
+        let attachResult = sqlite3_step(attachStatement)
+        sqlite3_finalize(attachStatement)
+        guard attachResult == SQLITE_DONE else {
+            throw BackupTransferError.invalidSnapshot(sqliteErrorMessage(from: db))
+        }
+
+        var transactionStarted = false
+        do {
+            try executeTransferSQL("BEGIN IMMEDIATE;")
+            transactionStarted = true
+
+            for table in ["clipboard_history", "recently_deleted"] {
+                let targetColumns = tableColumns(table, schema: "main", database: db)
+                let sourceColumns = tableColumns(table, schema: "imported_backup", database: db)
+                if sourceColumns.isEmpty {
+                    if table == "clipboard_history" {
+                        throw BackupTransferError.invalidSnapshot("Missing table \(table).")
+                    }
+                    continue
+                }
+
+                let commonColumns = targetColumns.filter { sourceColumns.contains($0) }
+                guard commonColumns.contains("id"), !commonColumns.isEmpty else {
+                    throw BackupTransferError.invalidSnapshot("Table \(table) has no compatible ID column.")
+                }
+                let columnList = commonColumns.map(quoteIdentifier).joined(separator: ", ")
+                try executeTransferSQL(
+                    "INSERT OR IGNORE INTO main.\(table) (\(columnList)) SELECT \(columnList) FROM imported_backup.\(table);"
+                )
+            }
+
+            try executeTransferSQL("COMMIT;")
+            transactionStarted = false
+            try? executeTransferSQL("DETACH DATABASE imported_backup;")
+        } catch {
+            if transactionStarted { try? executeTransferSQL("ROLLBACK;") }
+            try? executeTransferSQL("DETACH DATABASE imported_backup;")
+            throw error
+        }
+    }
+
+    private func copyDatabase(from source: OpaquePointer, to destination: OpaquePointer) throws {
+        guard let backup = sqlite3_backup_init(destination, "main", source, "main") else {
+            throw BackupTransferError.sqlite(sqliteErrorMessage(from: destination))
+        }
+
+        var result: Int32
+        repeat {
+            result = sqlite3_backup_step(backup, 256)
+            if result == SQLITE_BUSY || result == SQLITE_LOCKED { sqlite3_sleep(25) }
+        } while result == SQLITE_OK || result == SQLITE_BUSY || result == SQLITE_LOCKED
+
+        let finishResult = sqlite3_backup_finish(backup)
+        guard result == SQLITE_DONE, finishResult == SQLITE_OK else {
+            throw BackupTransferError.sqlite(sqliteErrorMessage(from: destination))
+        }
+    }
+
+    private func executeTransferSQL(_ sql: String) throws {
+        guard let db else { throw BackupTransferError.databaseUnavailable }
+        var errorMessage: UnsafeMutablePointer<Int8>?
+        let result = sqlite3_exec(db, sql, nil, nil, &errorMessage)
+        guard result == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? sqliteErrorMessage(from: db)
+            sqlite3_free(errorMessage)
+            throw BackupTransferError.sqlite(message)
+        }
+        sqlite3_free(errorMessage)
+    }
+
+    private func tableColumns(_ table: String, schema: String, database: OpaquePointer) -> [String] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA \(schema).table_info(\(table));", -1, &statement, nil) == SQLITE_OK else {
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                columns.append(String(cString: name))
+            }
+        }
+        return columns
+    }
+
+    private func quoteIdentifier(_ identifier: String) -> String {
+        "\"\(identifier.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    private func rowCount(in table: String, database: OpaquePointer) -> Int {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT COUNT(*) FROM \(table);", -1, &statement, nil) == SQLITE_OK else {
+            return 0
+        }
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_step(statement) == SQLITE_ROW ? Int(sqlite3_column_int64(statement, 0)) : 0
+    }
+
+    private func sqliteErrorMessage(from database: OpaquePointer?) -> String {
+        guard let database else { return "Unknown SQLite error." }
+        return String(cString: sqlite3_errmsg(database))
     }
     
     // MARK: - Table Creation

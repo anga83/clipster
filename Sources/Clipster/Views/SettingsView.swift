@@ -402,7 +402,7 @@ struct SettingsView: View {
                             icon: "square.and.arrow.down.fill",
                             iconColor: .orange,
                             title: "Import History",
-                            description: "Import history from JSON or ZIP file",
+                            description: "Restore a full Clipster ZIP backup or merge it with existing data",
                             buttonTitle: "Import"
                         ) {
                             historyStore.importHistory(settingsStore: settings)

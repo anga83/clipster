@@ -262,6 +262,30 @@ class SettingsStore: ObservableObject {
             self.fileTypeTreatments = [:]
         }
     }
+
+    /// Reloads persisted preferences after restoring a full backup.
+    /// When the backup has no settings file, use the application defaults.
+    func reloadFromPlist(resetToDefaultsIfMissing: Bool = false) {
+        guard FileManager.default.fileExists(atPath: settingsURL.path) else {
+            guard resetToDefaultsIfMissing else { return }
+            blacklistedAppIdentifiers = ["com.1password.1password"]
+            startWithMainWindow = false
+            launchAtLogin = false
+            maxFileSize = 3.0
+            fileSizeUnit = .MB
+            symlinkLargeFiles = false
+            menuBarClickOpensMainWindow = false
+            fileTypeTreatments = [:]
+            usePhysicalFileStorage = true
+            enableGlobalShortcut = true
+            archiveAttachmentRetentionDays = 30
+            archiveTextRetentionDays = -1
+            minTextLength = 1
+            recentUnpinnedInitialLoadLimit = 500
+            return
+        }
+        loadFromPlist()
+    }
     
     private func saveToPlist() {
         // Convert file type treatments to dictionary of strings

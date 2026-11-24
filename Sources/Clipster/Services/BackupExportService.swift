@@ -2,10 +2,24 @@ import Foundation
 import SQLite3
 
 final class BackupExportService: @unchecked Sendable {
+    enum ImportMode: Equatable, Sendable {
+        case replace
+        case merge
+    }
+
     struct PreparedBackup {
         let archiveURL: URL
         let temporaryDirectoryURL: URL
         let suggestedFileName: String
+    }
+
+    struct PreparedImport: Sendable {
+        let archiveURL: URL
+        let temporaryDirectoryURL: URL
+        let payloadDirectoryURL: URL
+        let databaseURL: URL
+        let settingsURL: URL?
+        let attachmentsURL: URL?
     }
 
     enum BackupExportError: LocalizedError {
@@ -13,6 +27,9 @@ final class BackupExportService: @unchecked Sendable {
         case sqliteFailure(String)
         case jsonExportFailure(String)
         case archiveFailure(String)
+        case invalidArchive(String)
+        case extractionFailure(String)
+        case rollbackFailure(String)
 
         var errorDescription: String? {
             switch self {
@@ -24,11 +41,287 @@ final class BackupExportService: @unchecked Sendable {
                 return "JSON export failed: \(details)"
             case .archiveFailure(let details):
                 return "ZIP creation failed: \(details)"
+            case .invalidArchive(let details):
+                return "This is not a valid Clipster backup: \(details)"
+            case .extractionFailure(let details):
+                return "Could not extract Clipster backup: \(details)"
+            case .rollbackFailure(let details):
+                return "Import failed and rollback could not fully restore the previous data: \(details)"
             }
         }
     }
 
     private let fileManager = FileManager.default
+
+    func prepareImport(from archiveURL: URL) throws -> PreparedImport {
+        let temporaryDirectoryURL = fileManager.temporaryDirectory
+            .appendingPathComponent("ClipsterImport-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try validateArchiveEntryPaths(at: archiveURL)
+            try fileManager.createDirectory(at: temporaryDirectoryURL, withIntermediateDirectories: true)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            process.arguments = ["-x", "-k", archiveURL.path, temporaryDirectoryURL.path]
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw BackupExportError.extractionFailure("ditto exited with status \(process.terminationStatus).")
+            }
+
+            let payloadDirectoryURL: URL
+            let standardPayloadURL = temporaryDirectoryURL.appendingPathComponent("ClipsterBackup", isDirectory: true)
+            if fileManager.fileExists(atPath: standardPayloadURL.path) {
+                payloadDirectoryURL = standardPayloadURL
+            } else if fileManager.fileExists(atPath: temporaryDirectoryURL.appendingPathComponent("backup-manifest.json").path) {
+                payloadDirectoryURL = temporaryDirectoryURL
+            } else {
+                throw BackupExportError.invalidArchive("The ClipsterBackup folder or manifest is missing.")
+            }
+
+            try validateNoSymbolicLinks(in: payloadDirectoryURL)
+            let manifestURL = payloadDirectoryURL.appendingPathComponent("backup-manifest.json")
+            let manifestData = try Data(contentsOf: manifestURL)
+            guard
+                let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+                (manifest["formatVersion"] as? NSNumber)?.intValue == 2
+            else {
+                throw BackupExportError.invalidArchive("Unsupported or malformed backup manifest.")
+            }
+
+            let databaseURL = payloadDirectoryURL.appendingPathComponent("clipster.db")
+            try validateDatabase(at: databaseURL)
+
+            let settingsURL = payloadDirectoryURL.appendingPathComponent("settings.plist")
+            if fileManager.fileExists(atPath: settingsURL.path) {
+                let settingsData = try Data(contentsOf: settingsURL)
+                guard try PropertyListSerialization.propertyList(from: settingsData, options: [], format: nil) is [String: Any] else {
+                    throw BackupExportError.invalidArchive("settings.plist is not a settings dictionary.")
+                }
+            }
+
+            let attachmentsURL = payloadDirectoryURL.appendingPathComponent("attachments", isDirectory: true)
+            if fileManager.fileExists(atPath: attachmentsURL.path) {
+                try validateAttachments(at: attachmentsURL)
+            }
+
+            return PreparedImport(
+                archiveURL: archiveURL,
+                temporaryDirectoryURL: temporaryDirectoryURL,
+                payloadDirectoryURL: payloadDirectoryURL,
+                databaseURL: databaseURL,
+                settingsURL: fileManager.fileExists(atPath: settingsURL.path) ? settingsURL : nil,
+                attachmentsURL: fileManager.fileExists(atPath: attachmentsURL.path) ? attachmentsURL : nil
+            )
+        } catch {
+            try? fileManager.removeItem(at: temporaryDirectoryURL)
+            throw error
+        }
+    }
+
+    func applyImport(
+        _ preparedImport: PreparedImport,
+        mode: ImportMode,
+        supportDirectoryURL: URL,
+        settingsFileURL: URL,
+        attachmentsDirectoryURL: URL,
+        databaseManager: DatabaseManager
+    ) throws {
+        let rollbackDirectoryURL = supportDirectoryURL.deletingLastPathComponent()
+            .appendingPathComponent(".ClipsterImportRollback-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: rollbackDirectoryURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: rollbackDirectoryURL) }
+
+        let previousDatabaseURL = rollbackDirectoryURL.appendingPathComponent("clipster.db")
+
+        switch mode {
+        case .replace:
+            try databaseManager.createSnapshot(at: previousDatabaseURL)
+            let previousSettingsURL = rollbackDirectoryURL.appendingPathComponent("settings.plist")
+            let hadSettings = fileManager.fileExists(atPath: settingsFileURL.path)
+            if hadSettings { try fileManager.copyItem(at: settingsFileURL, to: previousSettingsURL) }
+
+            let previousAttachmentsURL = rollbackDirectoryURL.appendingPathComponent("attachments", isDirectory: true)
+            let hadAttachments = fileManager.fileExists(atPath: attachmentsDirectoryURL.path)
+            if hadAttachments { try fileManager.moveItem(at: attachmentsDirectoryURL, to: previousAttachmentsURL) }
+
+            do {
+                if let importedAttachmentsURL = preparedImport.attachmentsURL {
+                    try fileManager.copyItem(at: importedAttachmentsURL, to: attachmentsDirectoryURL)
+                }
+                try replaceFile(settingsFileURL, with: preparedImport.settingsURL)
+                try databaseManager.replaceContents(from: preparedImport.databaseURL)
+                let migrationMarkerURL = supportDirectoryURL.appendingPathComponent(".migration_completed")
+                if !fileManager.fileExists(atPath: migrationMarkerURL.path) {
+                    try Data().write(to: migrationMarkerURL, options: .atomic)
+                }
+            } catch {
+                let originalError = error.localizedDescription
+                var rollbackErrors: [String] = []
+                do { try databaseManager.replaceContents(from: previousDatabaseURL) }
+                catch { rollbackErrors.append("database: \(error.localizedDescription)") }
+                do { try replaceFile(settingsFileURL, with: hadSettings ? previousSettingsURL : nil) }
+                catch { rollbackErrors.append("settings: \(error.localizedDescription)") }
+                do {
+                    if fileManager.fileExists(atPath: attachmentsDirectoryURL.path) {
+                        try fileManager.removeItem(at: attachmentsDirectoryURL)
+                    }
+                    if hadAttachments {
+                        try fileManager.moveItem(at: previousAttachmentsURL, to: attachmentsDirectoryURL)
+                    }
+                } catch {
+                    rollbackErrors.append("attachments: \(error.localizedDescription)")
+                }
+
+                if rollbackErrors.isEmpty { throw error }
+                throw BackupExportError.rollbackFailure("\(originalError); \(rollbackErrors.joined(separator: "; "))")
+            }
+
+        case .merge:
+            var copiedAttachmentURLs: [URL] = []
+            let hadAttachmentsDirectory = fileManager.fileExists(atPath: attachmentsDirectoryURL.path)
+            do {
+                if let importedAttachmentsURL = preparedImport.attachmentsURL {
+                    try fileManager.createDirectory(at: attachmentsDirectoryURL, withIntermediateDirectories: true)
+                    let entries = try fileManager.contentsOfDirectory(
+                        at: importedAttachmentsURL,
+                        includingPropertiesForKeys: nil,
+                        options: [.skipsHiddenFiles]
+                    )
+                    for entry in entries {
+                        let destinationURL = attachmentsDirectoryURL.appendingPathComponent(entry.lastPathComponent)
+                        guard !fileManager.fileExists(atPath: destinationURL.path) else { continue }
+                        try fileManager.copyItem(at: entry, to: destinationURL)
+                        copiedAttachmentURLs.append(destinationURL)
+                    }
+                }
+                try databaseManager.mergeContents(from: preparedImport.databaseURL)
+            } catch {
+                for url in copiedAttachmentURLs { try? fileManager.removeItem(at: url) }
+                if !hadAttachmentsDirectory,
+                   fileManager.fileExists(atPath: attachmentsDirectoryURL.path),
+                   (try? fileManager.contentsOfDirectory(atPath: attachmentsDirectoryURL.path).isEmpty) == true {
+                    try? fileManager.removeItem(at: attachmentsDirectoryURL)
+                }
+                throw error
+            }
+        }
+    }
+
+    private func replaceFile(_ destinationURL: URL, with sourceURL: URL?) throws {
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+        if let sourceURL {
+            try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        }
+    }
+
+    private func validateDatabase(at databaseURL: URL) throws {
+        guard fileManager.fileExists(atPath: databaseURL.path) else {
+            throw BackupExportError.invalidArchive("clipster.db is missing.")
+        }
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
+            let details = database.map { String(cString: sqlite3_errmsg($0)) } ?? "Could not open the database."
+            sqlite3_close(database)
+            throw BackupExportError.invalidArchive(details)
+        }
+        defer { sqlite3_close(database) }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA quick_check;", -1, &statement, nil) == SQLITE_OK else {
+            throw BackupExportError.invalidArchive("Could not check SQLite database integrity.")
+        }
+        let checkResult = sqlite3_step(statement)
+        let integrity = checkResult == SQLITE_ROW ? sqlite3_column_text(statement, 0).map { String(cString: $0) } : nil
+        sqlite3_finalize(statement)
+        guard integrity == "ok" else {
+            throw BackupExportError.invalidArchive("SQLite integrity check failed.")
+        }
+
+        for table in ["clipboard_history", "recently_deleted"] {
+            guard sqliteTableExists(table, in: database) else {
+                throw BackupExportError.invalidArchive("Required database table \(table) is missing.")
+            }
+        }
+    }
+
+    private func validateArchiveEntryPaths(at archiveURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-Z", "-1", archiveURL.path]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            throw BackupExportError.extractionFailure(error.localizedDescription)
+        }
+        let listing = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw BackupExportError.invalidArchive("The ZIP directory could not be read.")
+        }
+
+        let entries = String(decoding: listing, as: UTF8.self).split(whereSeparator: \.isNewline)
+        guard !entries.isEmpty else {
+            throw BackupExportError.invalidArchive("The ZIP archive is empty.")
+        }
+        for entry in entries {
+            let path = String(entry)
+            let components = path.split(separator: "/", omittingEmptySubsequences: false)
+            guard
+                !path.hasPrefix("/"),
+                !path.contains("\\"),
+                !components.contains(".."),
+                !components.contains(".")
+            else {
+                throw BackupExportError.invalidArchive("Unsafe ZIP entry path: \(path)")
+            }
+        }
+    }
+
+    private func sqliteTableExists(_ table: String, in database: OpaquePointer?) -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;", -1, &statement, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_finalize(statement) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(statement, 1, table, -1, transient)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    private func validateNoSymbolicLinks(in directoryURL: URL) throws {
+        let values = try directoryURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isSymbolicLink != true else {
+            throw BackupExportError.invalidArchive("Symbolic links are not allowed in backups.")
+        }
+        guard values.isDirectory == true else { return }
+        for child in try fileManager.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+            try validateNoSymbolicLinks(in: child)
+        }
+    }
+
+    private func validateAttachments(at attachmentsURL: URL) throws {
+        let values = try attachmentsURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true else {
+            throw BackupExportError.invalidArchive("attachments must be a regular directory.")
+        }
+        for entry in try fileManager.contentsOfDirectory(at: attachmentsURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+            let entryValues = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard
+                entryValues.isDirectory != true,
+                entryValues.isSymbolicLink != true,
+                entry.lastPathComponent != ".",
+                entry.lastPathComponent != "..",
+                !entry.lastPathComponent.contains("/")
+            else {
+                throw BackupExportError.invalidArchive("Invalid attachment entry: \(entry.lastPathComponent).")
+            }
+        }
+    }
 
     private static let backupNameFormatter: DateFormatter = {
         let formatter = DateFormatter()

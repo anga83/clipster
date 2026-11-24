@@ -464,10 +464,149 @@ class ClipboardHistoryStore: ObservableObject {
         }
     }
     
-    /// Imports clipboard history from a JSON file
+    /// Restores a full Clipster ZIP backup or merges it into the current history.
     func importHistory(settingsStore: SettingsStore) {
-        // Placeholder for import functionality
-        print("ClipboardHistoryStore: Import functionality placeholder")
+        let openPanel = NSOpenPanel()
+        openPanel.allowedContentTypes = [.zip]
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.title = "Import Clipster Backup"
+        openPanel.message = "Choose a ZIP backup created by Clipster's Export function."
+
+        guard openPanel.runModal() == .OK, let archiveURL = openPanel.url else { return }
+
+        let progressWindow = ExportProgressWindowController(title: "Clipster Backup Import")
+        progressWindow.showIndeterminate(status: "Validating backup…")
+        progressWindow.show()
+        exportProgressWindowController = progressWindow
+
+        let backupService = backupExportService
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let preparedImport = try backupService.prepareImport(from: archiveURL)
+                DispatchQueue.main.async {
+                    guard let self else {
+                        try? FileManager.default.removeItem(at: preparedImport.temporaryDirectoryURL)
+                        return
+                    }
+                    self.chooseImportMode(for: preparedImport)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishImportWithError(error)
+                }
+            }
+        }
+    }
+
+    private func chooseImportMode(for preparedImport: BackupExportService.PreparedImport) {
+        exportProgressWindowController?.close()
+        exportProgressWindowController = nil
+        let settingsStore = self.settingsStore
+
+        let mode: BackupExportService.ImportMode
+        if hasExistingUserData(settingsStore: settingsStore) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Existing Clipster Data Found"
+            alert.informativeText = "Choose whether to replace the current database, settings and attachments, or keep them and add clips from this backup. When merging, existing clips with the same ID and your current settings are kept."
+            alert.addButton(withTitle: "Keep Existing & Merge")
+            alert.addButton(withTitle: "Replace Existing Data")
+            alert.addButton(withTitle: "Cancel")
+
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                mode = .merge
+            case .alertSecondButtonReturn:
+                mode = .replace
+            default:
+                try? FileManager.default.removeItem(at: preparedImport.temporaryDirectoryURL)
+                return
+            }
+        } else {
+            mode = .replace
+        }
+
+        NotificationCenter.default.post(name: .clipsterPauseClipboardMonitoring, object: nil)
+        let progressWindow = ExportProgressWindowController(title: "Clipster Backup Import")
+        progressWindow.showIndeterminate(status: mode == .replace ? "Restoring backup…" : "Merging backup…")
+        progressWindow.show()
+        exportProgressWindowController = progressWindow
+
+        let backupService = backupExportService
+        let databaseManager = databaseManager
+        let supportDirectoryURL = settingsStore.getSupportDirectoryURL()
+        let settingsFileURL = settingsStore.getSettingsFileURL()
+        let attachmentsDirectoryURL = supportDirectoryURL.appendingPathComponent("attachments", isDirectory: true)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try backupService.applyImport(
+                    preparedImport,
+                    mode: mode,
+                    supportDirectoryURL: supportDirectoryURL,
+                    settingsFileURL: settingsFileURL,
+                    attachmentsDirectoryURL: attachmentsDirectoryURL,
+                    databaseManager: databaseManager
+                )
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else {
+                        try? FileManager.default.removeItem(at: preparedImport.temporaryDirectoryURL)
+                        NotificationCenter.default.post(name: .clipsterResumeClipboardMonitoring, object: nil)
+                        return
+                    }
+                    if mode == .replace {
+                        self.settingsStore.reloadFromPlist(resetToDefaultsIfMissing: true)
+                    }
+                    self.loadItemsFromDatabase()
+                    self.finishImportSuccessfully(mode: mode, preparedImport: preparedImport)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishImportWithError(error, preparedImport: preparedImport)
+                    NotificationCenter.default.post(name: .clipsterResumeClipboardMonitoring, object: nil)
+                }
+            }
+        }
+    }
+
+    private func hasExistingUserData(settingsStore: SettingsStore) -> Bool {
+        if databaseManager.hasStoredItems() { return true }
+        if FileManager.default.fileExists(atPath: settingsStore.getSettingsFileURL().path) { return true }
+        let attachmentsURL = settingsStore.getSupportDirectoryURL().appendingPathComponent("attachments", isDirectory: true)
+        return (try? FileManager.default.contentsOfDirectory(atPath: attachmentsURL.path).isEmpty) == false
+    }
+
+    private func finishImportSuccessfully(mode: BackupExportService.ImportMode, preparedImport: BackupExportService.PreparedImport) {
+        exportProgressWindowController?.close()
+        exportProgressWindowController = nil
+        try? FileManager.default.removeItem(at: preparedImport.temporaryDirectoryURL)
+        NotificationCenter.default.post(name: .clipsterResumeClipboardMonitoring, object: nil)
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = mode == .replace ? "Backup Restored" : "Backup Merged"
+        alert.informativeText = mode == .replace
+            ? "The Clipster database, settings and attachments have been restored."
+            : "Clips and archived items from the backup have been added. Your current settings were kept."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func finishImportWithError(_ error: Error, preparedImport: BackupExportService.PreparedImport? = nil) {
+        exportProgressWindowController?.close()
+        exportProgressWindowController = nil
+        if let preparedImport {
+            try? FileManager.default.removeItem(at: preparedImport.temporaryDirectoryURL)
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Import Failed"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func finishExportPreparation(_ preparedBackup: BackupExportService.PreparedBackup) {

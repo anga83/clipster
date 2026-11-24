@@ -6,7 +6,7 @@ final class ExportProgressWindowController {
     private let statusLabel = NSTextField(labelWithString: "Preparing backup ...")
     private let progressIndicator = NSProgressIndicator()
 
-    init() {
+    init(title: String = "Clipster Backup Export") {
         let contentRect = NSRect(x: 0, y: 0, width: 380, height: 120)
         window = NSWindow(
             contentRect: contentRect,
@@ -15,7 +15,7 @@ final class ExportProgressWindowController {
             defer: false
         )
 
-        window.title = "Clipster Backup Export"
+        window.title = title
         window.isReleasedWhenClosed = false
         window.level = .floating
         window.center()
@@ -47,8 +47,16 @@ final class ExportProgressWindowController {
     }
 
     func update(status: String, progress: Double) {
+        progressIndicator.isIndeterminate = false
+        progressIndicator.stopAnimation(nil)
         statusLabel.stringValue = status
         progressIndicator.doubleValue = max(0, min(100, progress * 100))
+    }
+
+    func showIndeterminate(status: String) {
+        statusLabel.stringValue = status
+        progressIndicator.isIndeterminate = true
+        progressIndicator.startAnimation(nil)
     }
 
     func close() {

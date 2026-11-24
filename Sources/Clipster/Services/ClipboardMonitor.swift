@@ -12,6 +12,10 @@ class ClipboardMonitor {
     private var lastChangeCount: Int
     private var ignorePasteboardChangesUpTo: Int = 0
     private var notificationObserver: NSObjectProtocol?
+    private var pauseObserver: NSObjectProtocol?
+    private var resumeObserver: NSObjectProtocol?
+    private let monitoringStateLock = NSLock()
+    private var isClipboardMonitoringPaused = false
 
     init(historyStore: ClipboardHistoryStore, settingsStore: SettingsStore) {
         self.historyStore = historyStore
@@ -33,16 +37,34 @@ class ClipboardMonitor {
                 self.ignorePasteboardChangesUpTo = max(self.ignorePasteboardChangesUpTo, changeCount)
             }
         }
+
+        pauseObserver = NotificationCenter.default.addObserver(
+            forName: .clipsterPauseClipboardMonitoring,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.pauseMonitoring()
+        }
+        resumeObserver = NotificationCenter.default.addObserver(
+            forName: .clipsterResumeClipboardMonitoring,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.resumeMonitoring()
+        }
     }
 
     deinit {
         if let notificationObserver {
             NotificationCenter.default.removeObserver(notificationObserver)
         }
+        if let pauseObserver { NotificationCenter.default.removeObserver(pauseObserver) }
+        if let resumeObserver { NotificationCenter.default.removeObserver(resumeObserver) }
     }
 
     /// Starts monitoring the clipboard for new clipboard content.
     func startMonitoring() {
+        guard timer == nil else { return }
         // Create a background timer; Sequoia is stricter about long work on main thread
         let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
         timer.schedule(deadline: .now() + .milliseconds(500), repeating: .milliseconds(350), leeway: .milliseconds(150))
@@ -59,7 +81,28 @@ class ClipboardMonitor {
         timer = nil
     }
 
+    private func pauseMonitoring() {
+        monitoringStateLock.lock()
+        isClipboardMonitoringPaused = true
+        monitoringStateLock.unlock()
+        stopMonitoring()
+    }
+
+    private func resumeMonitoring() {
+        monitoringStateLock.lock()
+        isClipboardMonitoringPaused = false
+        monitoringStateLock.unlock()
+        startMonitoring()
+    }
+
+    private func shouldPauseClipboardMonitoring() -> Bool {
+        monitoringStateLock.lock()
+        defer { monitoringStateLock.unlock() }
+        return isClipboardMonitoringPaused
+    }
+
     private func checkForChanges() {
+        guard !shouldPauseClipboardMonitoring() else { return }
         // Avoid mutating the data source while the initial list is being built/rendered
         let initialLoadDone: Bool = DispatchQueue.main.sync { historyStore.isInitialLoadComplete }
         if !initialLoadDone {
@@ -179,6 +222,12 @@ class ClipboardMonitor {
         if let item = newItem {
             print("ClipboardMonitor: Adding item to history store")
             DispatchQueue.main.async {
+                guard !self.shouldPauseClipboardMonitoring() else {
+                    if let filename = item.physicalFileName {
+                        self.settingsStore.deletePhysicalFile(filename: filename)
+                    }
+                    return
+                }
                 self.historyStore.addItem(item)
             }
         }

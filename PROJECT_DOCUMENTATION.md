@@ -4,7 +4,7 @@ Stand: 24. November 2026
 
 ## Projekt und aktueller Stand
 
-Clipster ist ein nativer macOS-Zwischenablage-Manager mit SwiftUI und AppKit. Die App läuft mit Menüleisten-Popover und optionalem Hauptfenster. App-Version und Build-Nummer werden in `Sources/Clipster/Resources/Info.plist` gepflegt (derzeit `2.5.4`, Build `38`). Mindestversion ist macOS 15.
+Clipster ist ein nativer macOS-Zwischenablage-Manager mit SwiftUI und AppKit. Die App läuft mit Menüleisten-Popover und optionalem Hauptfenster. App-Version und Build-Nummer werden in `Sources/Clipster/Resources/Info.plist` gepflegt (derzeit `2.6.0`, Build `39`). Mindestversion ist macOS 15.
 
 Das Repository verwendet Swift Package Manager. Es gibt ein ausführbares Target `Clipster`, aber derzeit kein separates Test-Target. SQLite wird über `sqlite3` eingebunden. AppKit- und SwiftUI-Funktionen werden im Paket direkt verwendet.
 
@@ -17,7 +17,8 @@ Das Repository verwendet Swift Package Manager. Es gibt ein ausführbares Target
 - Einträge lassen sich suchen, nach Quell-App, Pin-Status, Datum und Textlänge filtern, pinnen und löschen. Die Initialansicht lädt ein begrenztes aktuelles Set plus Pins; Suche und angewendete Filter fragen die ganze Datenbank ab. Filter im Hauptfenster werden zunächst als Entwurf gewählt und erst mit `Apply` abgefragt.
 - Gelöschte Einträge werden zunächst ins Archiv verschoben und können wiederhergestellt oder endgültig gelöscht werden. Archiv-Retention für Text und Anhänge ist getrennt konfigurierbar.
 - Der optionale globale Shortcut `⌥⌘V` erfasst das aktuelle Pasteboard auch dann, wenn die Quell-App auf der Blacklist steht.
-- Vollbackup als ZIP enthält einen SQLite-Snapshot, JSON-Exporte aktiver und archivierter Einträge, Einstellungen und vorhandene Anhänge. Der Importaufruf im aktuellen Store ist noch ein Placeholder und darf nicht als funktionierender Wiederherstellungsworkflow dokumentiert werden.
+- Vollbackup als ZIP enthält einen SQLite-Snapshot, JSON-Exporte aktiver und archivierter Einträge, Einstellungen und vorhandene Anhänge. Beim Import kann ein vollständiges Restore oder ein Merge gewählt werden.
+- Merge erhält vorhandene Clips bei ID-Konflikten und behält die aktuellen Einstellungen. Replace stellt Datenbank, Einstellungen und Anhänge aus dem Backup wieder her. Der Bestätigungsdialog bietet außerdem einen Abbruch, der keine Anwendungsdaten ändert.
 
 ## Persistenz und Datenbank-Kompatibilität
 
@@ -91,6 +92,5 @@ Xcode-Builds müssen auf einem Runner funktionieren, auf dem vollständige Xcode
 
 ## Bekannte Einschränkungen
 
-- `ClipboardHistoryStore.importHistory(...)` ist derzeit ein Placeholder; Backup-Export funktioniert, Import noch nicht.
 - Das Release-DMG wird nicht signiert oder notarisiert.
 - Im Quellcode bestehen SwiftUI-Deprecation- und Concurrency-Warnungen; vor Änderungen an den betroffenen Pfaden auf mögliche Regressionen achten.

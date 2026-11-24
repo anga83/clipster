@@ -10,7 +10,7 @@ Clipster keeps a searchable history of text and files copied on your Mac. Use th
 - Pin useful clips, preview or open file clips, and drag items into other apps.
 - Recover recently deleted clips from the Archive and choose how long archived text and file attachments are retained.
 - Set a minimum text length, manage apps excluded from monitoring, and configure how file attachments are stored.
-- Export a ZIP backup of your history, settings and stored attachments.
+- Export a ZIP backup of your database, settings and stored attachments, then restore it or merge its clips with existing history.
 - Optionally capture the current clipboard with **⌥⌘V**, including from an app on the blacklist.
 
 ## Requirements
