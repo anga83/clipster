@@ -1,6 +1,7 @@
 # Swift Package Manager
 .build/
 .swiftpm/
+.vscode/
 *.xcodeproj
 *.xcworkspace
 xcuserdata/
@@ -10,4 +11,5 @@ xcuserdata/
 
 # Release Builds
 Release/
+PreviousBuilds/
 bisherige Release-Versionen.zip
