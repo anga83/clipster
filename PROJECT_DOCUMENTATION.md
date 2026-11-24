@@ -67,6 +67,18 @@ Version und Build-Nummer für den Bundle-Metadatenstand in `Info.plist` pflegen.
 - Workflow-Permissions sind auf `contents: write` begrenzt, damit `gh release create` Release und Tag veröffentlichen kann.
 - Das DMG ist derzeit unsigniert und wird nicht notarisiert. Distribution ohne Apple Developer ID-Secrets ist dadurch möglich; Gatekeeper kann beim ersten Start eine manuelle Bestätigung erfordern.
 
+### Release-Pipeline: Versionssprung bis GitHub Release
+
+Für einen neuen Release ist kein lokaler App-Bundle-Build und kein manuell angelegter Git-Tag nötig. Der einheitliche Ablauf:
+
+1. In `Sources/Clipster/Resources/Info.plist` `CFBundleShortVersionString` auf eine noch unveröffentlichte Version setzen und `CFBundleVersion` erhöhen.
+2. Änderungen inklusive Versionssprung committen. Die Commit-Betreffzeilen werden als Changelog verwendet.
+3. Den Commit auf `main` pushen (`git push origin main`). Jeder Push auf `main` startet die Action.
+4. Die Action liest die Version, baut App und DMG, erstellt den Tag `v<Version>` und veröffentlicht das DMG als GitHub Release. Release Notes enthalten die Commit-Betreffzeilen seit dem vorherigen Versions-Tag.
+5. Den Action-Lauf und das veröffentlichte Release auf GitHub prüfen.
+
+Den Tag **nicht vorab lokal erstellen oder pushen**: `gh release create` legt ihn im Action-Lauf am gepushten Commit an. Existiert `v<Version>` bereits, überspringt die Action Build und Veröffentlichung; für jeden neuen Release ist daher ein Versionssprung erforderlich. Ein Push ohne Versionssprung startet zwar den Workflow, erzeugt aber keinen zweiten Release.
+
 Xcode-Builds müssen auf einem Runner funktionieren, auf dem vollständige Xcode- und Command-Line-Tools verfügbar sind. Bei lokalen SwiftPM-/Asset-Katalog-Problemen sicherstellen, dass `DEVELOPER_DIR` auf Xcode zeigt. `actool` setzt die vollständige Xcode-Installation voraus.
 
 ## Architektur- und Änderungsleitlinien
