@@ -118,9 +118,6 @@ struct ClipsterApp: App {
                     // Request notification permissions for global shortcut feedback
                     requestNotificationPermissions()
 
-                    // Set up the app icon when the app is fully loaded
-                    setupAppIcon()
-
                     // If the main window is visible, the app must be regular to show menu bar entries.
                     isMainWindowOpen = true
                     updateActivationPolicyForMainWindowVisibility(isVisible: true)
@@ -162,39 +159,6 @@ struct ClipsterApp: App {
         .windowResizability(.contentSize)
     }
 
-    private func setupAppIcon() {
-        // Ensure we're on the main thread and NSApp is ready
-        DispatchQueue.main.async {
-            // Create the same icon used in the About dialog for the dock with blue and white colors
-            let iconSize: CGFloat = 512
-            let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
-            
-            image.lockFocus()
-            
-            // Create the SF Symbol with palette coloring
-            let symbolConfig = NSImage.SymbolConfiguration(pointSize: iconSize * 0.8, weight: .regular)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [.white, .systemBlue]))
-            
-            if let symbolImage = NSImage(systemSymbolName: "paperclip.circle.fill", accessibilityDescription: "Clipster") {
-                let coloredSymbol = symbolImage.withSymbolConfiguration(symbolConfig) ?? symbolImage
-                
-                // Calculate centered position
-                let symbolSize = coloredSymbol.size
-                let x = (iconSize - symbolSize.width) / 2
-                let y = (iconSize - symbolSize.height) / 2
-                let drawRect = NSRect(x: x, y: y, width: symbolSize.width, height: symbolSize.height)
-                
-                // Draw the palette colored symbol
-                coloredSymbol.draw(in: drawRect, from: NSRect(origin: .zero, size: symbolSize), operation: .sourceOver, fraction: 1.0)
-            }
-            
-            image.unlockFocus()
-            image.isTemplate = false
-            
-            NSApp.applicationIconImage = image
-        }
-    }
-    
     private func requestNotificationPermissions() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error = error {
