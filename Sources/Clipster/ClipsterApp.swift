@@ -5,6 +5,7 @@ import UserNotifications
 struct ClipsterApp: App {
     @StateObject private var settingsStore: SettingsStore
     @StateObject private var historyStore: ClipboardHistoryStore
+    @StateObject private var timelineNavigation = TimelineNavigationCoordinator()
     @Environment(\.openWindow) private var openWindow
     @State private var clipboardMonitor: ClipboardMonitor?
     @State private var globalShortcutService: GlobalShortcutService?
@@ -60,6 +61,7 @@ struct ClipsterApp: App {
                 ContentView(isPopover: true)
                     .environmentObject(historyStore)
                     .environmentObject(settingsStore)
+                    .environmentObject(timelineNavigation)
             }
         } label: {
             Button(action: {
@@ -100,6 +102,7 @@ struct ClipsterApp: App {
             ContentView(isPopover: false)
                 .environmentObject(historyStore)
                 .environmentObject(settingsStore)
+                .environmentObject(timelineNavigation)
                 .onAppear {
                     // Defer background services slightly to avoid main-thread hitches at launch (Sequoia)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

@@ -6,6 +6,7 @@ Clipster keeps a searchable history of text and files copied on your Mac. Use th
 
 - Keeps a local history of copied text and file URLs.
 - Search and filter clips by text, source app, date, length and pinned status.
+- Jump from a search result to its chronological position in the main timeline, with nearby clips loaded on demand.
 - Click a clip to copy its plain text. For clips with rich text, choose **Copy formatted** from the context menu to preserve formatting such as colors, bold and italics.
 - Pin useful clips, preview or open file clips, and drag items into other apps.
 - Recover recently deleted clips from the Archive and choose how long archived text and file attachments are retained.

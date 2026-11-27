@@ -5,6 +5,7 @@ import QuickLook
 struct ClipboardItemRowView: View {
     let item: ClipboardItem
     let deleteAction: () -> Void
+    let showInTimelineAction: (() -> Void)?
     let isSelectionMode: Bool
     let isSelected: Bool
     let onSelectionToggle: () -> Void
@@ -153,6 +154,11 @@ struct ClipboardItemRowView: View {
             deleteAction()
         })
         .keyboardShortcut(.delete, modifiers: [])
+
+        if let showInTimelineAction {
+            Divider()
+            Button("Show in Timeline", action: showInTimelineAction)
+        }
     }
 
     private func copyItemToClipboard() {

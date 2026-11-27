@@ -568,14 +568,14 @@ class DatabaseManager: @unchecked Sendable {
             SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
                    is_pinned, attachment_data, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
             FROM clipboard_history 
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             """.appending(limitOffsetClause(limit: limit, offset: offset)).appending(";")
         } else {
             selectSQL = """
             SELECT id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
                    is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
             FROM clipboard_history 
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             """.appending(limitOffsetClause(limit: limit, offset: offset)).appending(";")
         }
         
@@ -751,6 +751,80 @@ class DatabaseManager: @unchecked Sendable {
         }
         sqlite3_finalize(statement)
         return items
+    }
+
+    /// Loads a bounded, chronological window around an item without loading the full history.
+    func loadTimelineWindow(around itemId: UUID, radius: Int = 100) -> [ClipboardItem] {
+        let itemID = itemId.uuidString
+        let rankSQL = """
+        SELECT timestamp FROM clipboard_history WHERE id = ?;
+        """
+        var rankStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, rankSQL, -1, &rankStatement, nil) == SQLITE_OK else { return [] }
+        bindString(rankStatement, itemID, at: 1)
+        guard sqlite3_step(rankStatement) == SQLITE_ROW else {
+            sqlite3_finalize(rankStatement)
+            return []
+        }
+        let timestamp = sqlite3_column_double(rankStatement, 0)
+        sqlite3_finalize(rankStatement)
+
+        let indexSQL = """
+        SELECT COUNT(*) FROM clipboard_history
+        WHERE timestamp > ? OR (timestamp = ? AND id > ?);
+        """
+        var indexStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, indexSQL, -1, &indexStatement, nil) == SQLITE_OK else { return [] }
+        sqlite3_bind_double(indexStatement, 1, timestamp)
+        sqlite3_bind_double(indexStatement, 2, timestamp)
+        bindString(indexStatement, itemID, at: 3)
+        let offset = sqlite3_step(indexStatement) == SQLITE_ROW
+            ? max(0, Int(sqlite3_column_int64(indexStatement, 0)) - max(0, radius))
+            : 0
+        sqlite3_finalize(indexStatement)
+
+        return loadAllClipboardItems(limit: max(1, radius) * 2 + 1, offset: offset)
+    }
+
+    /// Loads the next page in newest-first timeline order from a cursor item.
+    func loadTimelinePage(olderThan cursor: ClipboardItem?, limit: Int = 100) -> [ClipboardItem] {
+        loadTimelinePage(from: cursor, older: true, limit: limit)
+    }
+
+    func loadTimelinePage(newerThan cursor: ClipboardItem?, limit: Int = 100) -> [ClipboardItem] {
+        loadTimelinePage(from: cursor, older: false, limit: limit)
+    }
+
+    private func loadTimelinePage(from cursor: ClipboardItem?, older: Bool, limit: Int) -> [ClipboardItem] {
+        let safeLimit = max(1, min(500, limit))
+        let columns = """
+        id, content_type, content_text, content_url, timestamp, source_app_bundle_id, source_app_name,
+        is_pinned, attachment_filename, attachment_file_extension, attachment_uti, physical_filename, formatted_content
+        """
+        var sql = "SELECT \(columns) FROM clipboard_history"
+        if cursor != nil {
+            let comparator = older ? "<" : ">"
+            sql += " WHERE timestamp \(comparator) ? OR (timestamp = ? AND id \(comparator) ?)"
+        }
+        sql += older
+            ? " ORDER BY timestamp DESC, id DESC LIMIT \(safeLimit);"
+            : " ORDER BY timestamp ASC, id ASC LIMIT \(safeLimit);"
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        if let cursor {
+            let timestamp = cursor.timestamp.timeIntervalSince1970
+            sqlite3_bind_double(statement, 1, timestamp)
+            sqlite3_bind_double(statement, 2, timestamp)
+            bindString(statement, cursor.id.uuidString, at: 3)
+        }
+
+        var items: [ClipboardItem] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let item = createClipboardItemFromRowLight(statement: statement) { items.append(item) }
+        }
+        sqlite3_finalize(statement)
+        return older ? items : items.reversed()
     }
 
     func searchClipboardItems(query: String, sourceAppName: String? = nil, limit: Int = 1000) -> [ClipboardItem] {

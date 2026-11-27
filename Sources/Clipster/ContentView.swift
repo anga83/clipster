@@ -6,6 +6,7 @@ struct ContentView: View {
     // Access the shared history store from the environment.
     @EnvironmentObject var historyStore: ClipboardHistoryStore
     @EnvironmentObject var settingsStore: SettingsStore
+    @EnvironmentObject private var timelineNavigation: TimelineNavigationCoordinator
     @Environment(\.openWindow) private var openWindow
 
     /// Determines if the view is in a popover, which affects UI elements like the settings menu.
@@ -42,6 +43,16 @@ struct ContentView: View {
     @State private var metadataRequestID: Int = 0
     @State private var queryTask: Task<Void, Never>?
     @State private var metadataTask: Task<Void, Never>?
+    @State private var timelineItems: [ClipboardItem]?
+    @State private var timelineTask: Task<Void, Never>?
+    @State private var isLoadingTimelineWindow = false
+    @State private var isLoadingNewerTimelinePage = false
+    @State private var isLoadingOlderTimelinePage = false
+    @State private var timelineRequestID = 0
+    @State private var hasNewerTimelineItems = true
+    @State private var hasOlderTimelineItems = true
+    @State private var timelineScrollTarget: UUID?
+    @State private var timelineListIdentity = UUID()
     @State private var suspendAutomaticQuery = false
     @State private var isSelectionMode: Bool = false
     @State private var selectedItems: Set<UUID> = []
@@ -85,13 +96,13 @@ struct ContentView: View {
     }
 
     private var filteredItems: [ClipboardItem] {
-        let sourceItems = shouldUseDatabaseQuery ? queriedItems : baseItems
-        return sourceItems.sorted { first, second in
-            if first.isPinned != second.isPinned {
-                return first.isPinned
-            }
-            return first.timestamp > second.timestamp
-        }
+        let sourceItems = timelineItems ?? (shouldUseDatabaseQuery ? queriedItems : baseItems)
+        return sourceItems.sorted(by: Self.timelineOrder)
+    }
+
+    private static func timelineOrder(_ first: ClipboardItem, _ second: ClipboardItem) -> Bool {
+        if first.timestamp != second.timestamp { return first.timestamp > second.timestamp }
+        return first.id.uuidString > second.id.uuidString
     }
 
     private var sourceApps: [String] {
@@ -132,13 +143,7 @@ struct ContentView: View {
 
         return finalOrder.compactMap { key in
             guard let items = groups[key] else { return nil }
-            // Sort items within each group: pinned items first, then by timestamp (newest first)
-            let sortedItems = items.sorted { first, second in
-                if first.isPinned != second.isPinned {
-                    return first.isPinned // Pinned items come first
-                }
-                return first.timestamp > second.timestamp // Newest first within same pinned state
-            }
+            let sortedItems = items.sorted(by: Self.timelineOrder)
             return (title: key, items: sortedItems)
         }
     }
@@ -291,7 +296,20 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            runQueryIfNeeded()
+            if !isPopover {
+                timelineItems = nil
+                timelineScrollTarget = nil
+                isLoadingTimelineWindow = false
+            }
+            if !isPopover, let request = timelineNavigation.request {
+                handleTimelineNavigation(request)
+            } else {
+                runQueryIfNeeded()
+            }
+        }
+        .onChange(of: timelineNavigation.request) { _, request in
+            guard !isPopover, let request else { return }
+            handleTimelineNavigation(request)
         }
         .onChange(of: searchText) { _, _ in
             handleAutomaticQueryUpdate()
@@ -329,6 +347,21 @@ struct ContentView: View {
         .onDisappear {
             queryTask?.cancel()
             metadataTask?.cancel()
+            timelineTask?.cancel()
+            timelineRequestID += 1
+            if !isPopover {
+                timelineItems = nil
+                timelineScrollTarget = nil
+                isLoadingTimelineWindow = false
+                timelineListIdentity = UUID()
+                suspendAutomaticQuery = true
+                searchText = ""
+                selectedSourceApps.removeAll()
+                pinnedOnlyFilter = false
+                useDateRangeFilter = false
+                useTextLengthFilter = false
+                suspendAutomaticQuery = false
+            }
         }
     }
     
@@ -356,58 +389,69 @@ struct ContentView: View {
     
     @ViewBuilder
     private var mainListView: some View {
-        Group {
-            if isPopover {
-                // Use ScrollView + LazyVStack in menu bar to avoid NSTableView reentrancy and heavy list overhead
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
-                        if normalizedSearchText.isEmpty {
-                            ForEach(groupedItems, id: \.title) { group in
-                                Text(group.title)
+        ScrollViewReader { proxy in
+            Group {
+                if isPopover {
+                    // Use ScrollView + LazyVStack in menu bar to avoid NSTableView reentrancy and heavy list overhead
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                            if normalizedSearchText.isEmpty {
+                                ForEach(groupedItems, id: \.title) { group in
+                                    Text(group.title)
+                                        .font(.headline)
+                                        .padding(.vertical, 4)
+                                        .padding(.horizontal, 10)
+                                    ForEach(group.items) { item in
+                                        itemRowView(for: item).padding(.horizontal, 6)
+                                    }
+                                }
+                            } else {
+                                Text("Results (\(filteredItems.count))")
                                     .font(.headline)
                                     .padding(.vertical, 4)
                                     .padding(.horizontal, 10)
-                                ForEach(group.items) { item in
-                                    itemRowView(for: item)
-                                        .padding(.horizontal, 6)
+                                ForEach(filteredItems) { item in
+                                    itemRowView(for: item).padding(.horizontal, 6)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    List {
+                        if normalizedSearchText.isEmpty {
+                            ForEach(groupedItems, id: \.title) { group in
+                                Section(header: Text(group.title).font(.headline).padding(.vertical, 4)) {
+                                    ForEach(group.items) { item in itemRowView(for: item) }
                                 }
                             }
                         } else {
-                            Text("Results (\(filteredItems.count))")
-                                .font(.headline)
-                                .padding(.vertical, 4)
-                                .padding(.horizontal, 10)
-                            ForEach(filteredItems) { item in
-                                itemRowView(for: item)
-                                    .padding(.horizontal, 6)
+                            Section(header: Text("Results (\(filteredItems.count))").font(.headline).padding(.vertical, 4)) {
+                                ForEach(filteredItems) { item in itemRowView(for: item) }
                             }
                         }
                     }
+                    .id(timelineListIdentity)
+                    .listStyle(.sidebar)
+                    // Disable implicit animations to avoid NSTableView reentrant delegate warnings on macOS Sequoia
+                    .transaction { txn in txn.animation = nil }
                 }
-            } else {
-                List {
-                        if normalizedSearchText.isEmpty {
-                        ForEach(groupedItems, id: \.title) { group in
-                            Section(header: Text(group.title).font(.headline).padding(.vertical, 4)) {
-                                ForEach(group.items) { item in
-                                    itemRowView(for: item)
-                                }
-                            }
-                        }
-                    } else {
-                        Section(header: Text("Results (\(filteredItems.count))").font(.headline).padding(.vertical, 4)) {
-                            ForEach(filteredItems) { item in
-                                itemRowView(for: item)
-                            }
-                        }
-                    }
+            }
+            .overlay { emptyStateView }
+            .onChange(of: timelineScrollTarget) { _, itemID in
+                guard let itemID else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(itemID, anchor: .center)
+                    timelineScrollTarget = nil
                 }
-                .listStyle(.sidebar)
-                // Disable implicit animations to avoid NSTableView reentrant delegate warnings on macOS Sequoia
-                .transaction { txn in txn.animation = nil }
+            }
+            .onAppear {
+                guard !isPopover else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    guard timelineItems == nil, timelineScrollTarget == nil else { return }
+                    if let firstItem = filteredItems.first { proxy.scrollTo(firstItem.id, anchor: .top) }
+                }
             }
         }
-        .overlay { emptyStateView }
     }
     
     @ViewBuilder
@@ -419,6 +463,10 @@ struct ContentView: View {
                 // Perform deletion without implicit list animations to avoid reentrancy
                 historyStore.removeItemAndCleanup(item, settingsStore: settingsStore)
             },
+            showInTimelineAction: normalizedSearchText.isEmpty ? nil : {
+                timelineNavigation.show(itemID: item.id)
+                if isPopover { openMainWindowFromPopoverMenu() }
+            },
             isSelectionMode: isSelectionMode,
             isSelected: selectedItems.contains(item.id),
             onSelectionToggle: {
@@ -426,6 +474,11 @@ struct ContentView: View {
             }
         )
         .id(item.id)
+        .onAppear {
+            guard timelineItems != nil, let first = filteredItems.first, let last = filteredItems.last else { return }
+            if item.id == first.id { loadNewerTimelinePage() }
+            if item.id == last.id { loadOlderTimelinePage() }
+        }
     }
     
     @ViewBuilder
@@ -438,7 +491,15 @@ struct ContentView: View {
     /// The view to display when no items match the current search or filter.
     @ViewBuilder
     private var emptyStateView: some View {
-        if shouldUseDatabaseQuery && isRunningQuery {
+        if isLoadingTimelineWindow {
+            VStack(spacing: 10) {
+                ProgressView()
+                Text("Loading timeline …")
+                    .font(.headline)
+            }
+            .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if shouldUseDatabaseQuery && isRunningQuery {
             VStack(spacing: 10) {
                 ProgressView()
                 Text("Filtering ...")
@@ -905,6 +966,72 @@ extension ContentView {
         selectedItems = selectedItems.intersection(visibleIDs)
         if let lastSelectedItem, !visibleIDs.contains(lastSelectedItem) {
             self.lastSelectedItem = nil
+        }
+    }
+
+    private func handleTimelineNavigation(_ request: TimelineNavigationCoordinator.Request) {
+        guard timelineNavigation.request?.id == request.id else { return }
+        timelineNavigation.consume(request)
+        timelineTask?.cancel()
+        queryTask?.cancel()
+        timelineRequestID += 1
+        let requestID = timelineRequestID
+
+        searchText = ""
+        resetFilters()
+        timelineItems = []
+        isLoadingTimelineWindow = true
+        timelineScrollTarget = nil
+        timelineListIdentity = UUID()
+        hasNewerTimelineItems = true
+        hasOlderTimelineItems = true
+        isLoadingNewerTimelinePage = false
+        isLoadingOlderTimelinePage = false
+
+        timelineTask = Task {
+            let items = await historyStore.loadTimelineWindowAsync(around: request.itemID)
+            guard !Task.isCancelled, requestID == timelineRequestID else { return }
+            isLoadingTimelineWindow = false
+            timelineItems = items
+            if items.contains(where: { $0.id == request.itemID }) {
+                timelineScrollTarget = request.itemID
+            } else {
+                timelineItems = nil
+            }
+        }
+    }
+
+    private func loadNewerTimelinePage() {
+        guard timelineItems != nil, hasNewerTimelineItems, !isLoadingNewerTimelinePage,
+              let cursor = filteredItems.first else { return }
+        isLoadingNewerTimelinePage = true
+        let requestID = timelineRequestID
+
+        Task {
+            let page = await historyStore.loadTimelinePageAsync(newerThan: cursor)
+            guard requestID == timelineRequestID else { return }
+            isLoadingNewerTimelinePage = false
+            hasNewerTimelineItems = page.count == 100
+            guard !page.isEmpty else { return }
+            let existingIDs = Set(filteredItems.map(\.id))
+            timelineItems = (page.filter { !existingIDs.contains($0.id) } + filteredItems).sorted(by: Self.timelineOrder)
+        }
+    }
+
+    private func loadOlderTimelinePage() {
+        guard timelineItems != nil, hasOlderTimelineItems, !isLoadingOlderTimelinePage,
+              let cursor = filteredItems.last else { return }
+        isLoadingOlderTimelinePage = true
+        let requestID = timelineRequestID
+
+        Task {
+            let page = await historyStore.loadTimelinePageAsync(olderThan: cursor)
+            guard requestID == timelineRequestID else { return }
+            isLoadingOlderTimelinePage = false
+            hasOlderTimelineItems = page.count == 100
+            guard !page.isEmpty else { return }
+            let existingIDs = Set(filteredItems.map(\.id))
+            timelineItems = (filteredItems + page.filter { !existingIDs.contains($0.id) }).sorted(by: Self.timelineOrder)
         }
     }
 

@@ -200,6 +200,33 @@ class ClipboardHistoryStore: ObservableObject {
         }
     }
 
+    func loadTimelineWindowAsync(around itemID: UUID) async -> [ClipboardItem] {
+        let db = databaseManager
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: db.loadTimelineWindow(around: itemID, radius: 100))
+            }
+        }
+    }
+
+    func loadTimelinePageAsync(olderThan cursor: ClipboardItem?, limit: Int = 100) async -> [ClipboardItem] {
+        let db = databaseManager
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: db.loadTimelinePage(olderThan: cursor, limit: limit))
+            }
+        }
+    }
+
+    func loadTimelinePageAsync(newerThan cursor: ClipboardItem?, limit: Int = 100) async -> [ClipboardItem] {
+        let db = databaseManager
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: db.loadTimelinePage(newerThan: cursor, limit: limit))
+            }
+        }
+    }
+
     // MARK: - Public Methods
 
     /// Adds a new item to the top of the history.
