@@ -4,7 +4,7 @@ Stand: 24. November 2026
 
 ## Projekt und aktueller Stand
 
-Clipster ist ein nativer macOS-Zwischenablage-Manager mit SwiftUI und AppKit. Die App läuft mit Menüleisten-Popover und optionalem Hauptfenster. App-Version und Build-Nummer werden in `Sources/Clipster/Resources/Info.plist` gepflegt (derzeit `2.6.0`, Build `39`). Mindestversion ist macOS 15.
+Clipster ist ein nativer macOS-Zwischenablage-Manager mit SwiftUI und AppKit. Die App läuft mit Menüleisten-Popover und optionalem Hauptfenster. App-Version und Build-Nummer werden in `Sources/Clipster/Resources/Info.plist` gepflegt (derzeit `2.6.1`, Build `40`). Mindestversion ist macOS 15.
 
 Das Repository verwendet Swift Package Manager. Es gibt ein ausführbares Target `Clipster`, aber derzeit kein separates Test-Target. SQLite wird über `sqlite3` eingebunden. AppKit- und SwiftUI-Funktionen werden im Paket direkt verwendet.
 

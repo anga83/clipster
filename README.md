@@ -17,7 +17,7 @@ Clipster keeps a searchable history of text and files copied on your Mac. Use th
 ## Requirements
 
 - macOS 15 or later
-- Apple Silicon or Intel Mac
+- Apple Silicon (arm64) Mac
 
 ## Install
 

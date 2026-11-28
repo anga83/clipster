@@ -115,7 +115,7 @@ struct SettingsView: View {
         .frame(width: 840, height: 600)
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .navigationTitle("")
-        .onChange(of: selectedTab) { newValue in
+        .onChange(of: selectedTab) { _, newValue in
             debugLogger.log("SettingsView tab changed to \(newValue)", level: .info)
             if newValue == .archive {
                 debugLogger.logArchiveOperation("Archive tab selected", details: "About to show ArchiveView")
@@ -251,7 +251,7 @@ struct SettingsView: View {
                                 }
                                 .pickerStyle(.segmented)
                                 .frame(width: 120)
-                                .onChange(of: settings.fileSizeUnit) { newUnit in
+                                .onChange(of: settings.fileSizeUnit) { _, newUnit in
                                     settings.maxFileSize = settings.convertFileSize(to: newUnit)
                                 }
                                 

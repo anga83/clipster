@@ -41,6 +41,16 @@ jobs:
         if: steps.version.outputs.already_released == 'false'
         run: swift build -c release
 
+      - name: Verify Apple Silicon-only release binary
+        if: steps.version.outputs.already_released == 'false'
+        shell: bash
+        run: |
+          ARCHS=$(lipo -archs .build/release/Clipster)
+          if [[ "$ARCHS" != "arm64" ]]; then
+            echo "Expected an arm64-only release binary, got: ${ARCHS}"
+            exit 1
+          fi
+
       - name: Assemble app bundle
         if: steps.version.outputs.already_released == 'false'
         shell: bash
